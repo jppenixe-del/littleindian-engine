@@ -1,0 +1,36 @@
+{
+ "iter": 3,
+ "theta": {
+  "RfpMargin": 49.20776689239606,
+  "RazorBase": 326.03883446198034,
+  "RazorMult": 273.96116553801966,
+  "FutilityBase": 76.5170707776737,
+  "FutilityMargin": 120.24497864581159,
+  "SeePruneMargin": 227.50799362085115,
+  "AspirationDelta": 18.84060012312512,
+  "ProbcutMargin": 198.6954990765616,
+  "SeMargin": 64.00137329128292,
+  "HistPruneMargin": 1608.0376512209796,
+  "DeltaMargin": 358.9959945670915,
+  "LmpBase": 5.640773602675174,
+  "LmpMult": 1
+ },
+ "grupo": "eval_scale",
+ "params": [
+  "RfpMargin",
+  "RazorBase",
+  "RazorMult",
+  "FutilityBase",
+  "FutilityMargin",
+  "SeePruneMargin",
+  "AspirationDelta",
+  "ProbcutMargin",
+  "SeMargin",
+  "HistPruneMargin",
+  "DeltaMargin",
+  "LmpBase",
+  "LmpMult"
+ ],
+ "ultimo_y": 0.6,
+ "ts": 1781793029.4028654
+}
