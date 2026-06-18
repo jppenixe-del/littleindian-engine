@@ -227,12 +227,20 @@ void uci::loop() {
                 b.setFen(BENCH_FENS[i]);
                 Limits lim;
                 lim.depth = benchDepth;
-                lim.infinite = false;
-                // We need node count from search — for now just run it
-                search(b, lim);
+                // infinite=true desliga o corte por tempo (soft/hard ficam a
+                // 0) — bench fica só limitado por depth, sempre o mesmo nº de
+                // nós na mesma posição independente da carga da máquina.
+                // Sem isto, o soft limit de 5s podia cortar antes da depth
+                // pedida sob CPU ocupada, dando uma "assinatura" instável.
+                lim.infinite = true;
+                uint64_t nodes = 0;
+                search(b, lim, &nodes);
+                totalNodes += nodes;
             }
             auto t1 = std::chrono::steady_clock::now();
             double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+            uint64_t benchNps = ms > 0 ? (uint64_t)(totalNodes * 1000.0 / ms) : totalNodes;
+            std::printf("\n%llu nodes %llu nps\n", (unsigned long long)totalNodes, (unsigned long long)benchNps);
             std::printf("bench complete in %.0f ms\n", ms);
         } else if (cmd == "version") {
             napoleon::nnue::printNetInfo();

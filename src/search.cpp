@@ -885,7 +885,7 @@ bool setTunableParam(const std::string& name, int value) {
 }
 
 // ─── Iterative deepening ──────────────────────────────────────────────────
-void search(Board& board, const Limits& limits) {
+void search(Board& board, const Limits& limits, uint64_t* nodesOut) {
     SearchInfo info;
     info.startMs = nowMs();
     info.nodeLimit = limits.nodes;
@@ -1054,6 +1054,8 @@ void search(Board& board, const Limits& limits) {
     }
     printf("bestmove %s\n", mv);
     fflush(stdout);
+
+    if (nodesOut) *nodesOut = info.nodes;
 }
 
 int seeValue(const Board& board, Move m) {

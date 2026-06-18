@@ -32,7 +32,7 @@ static constexpr int MATE_SCORE = 31000;
 static constexpr int MATE_IN(int n) { return MATE_SCORE - n; }
 static inline bool   isMate(int s)  { return std::abs(s) >= MATE_SCORE - 512; }
 
-void search(Board& board, const Limits& limits);
+void search(Board& board, const Limits& limits, uint64_t* nodesOut = nullptr);
 
 // Parâmetros de busca afináveis por SPSA (training/spsa_tune.py), expostos
 // como opções UCI "type spin". printTunableOptions() imprime as linhas

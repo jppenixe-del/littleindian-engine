@@ -35,7 +35,29 @@ avx2-embed: $(SRC_CORE) $(SRC_NNUE)
 	  -DEMBEDDED_NET_PATH=\"$(abspath $(NET))\" \
 	  -o littleindian $^
 
-clean:
-	rm -f littleindian littleindian.o
+# ── AVX-512 build ─────────────────────────────────────────────────────────
+avx512-embed: $(SRC_CORE) $(SRC_NNUE)
+	$(CXX) $(CXXFLAGS) -mavx512f -mavx512bw -mavx512vl \
+	  -DEMBEDDED_NET_PATH=\"$(abspath $(NET))\" \
+	  -o littleindian $^
 
-.PHONY: f1 native-embed avx2-embed clean
+# ── PGO (profile-guided): 1) instrumenta, 2) corre bench p/ recolher o
+#    perfil, 3) recompila com o perfil. Usa native (-march=native) como base.
+#    ⚠️ o gcc nomeia os .gcda a partir do nome do BINÁRIO de saída
+#    (ex.: littleindian-search.gcda) — as duas fases têm de usar o MESMO
+#    -o, senão a fase 3 não encontra o perfil da fase 1 (já aconteceu).
+pgo-embed: $(SRC_CORE) $(SRC_NNUE)
+	$(CXX) $(CXXFLAGS) -march=native -fprofile-generate \
+	  -DEMBEDDED_NET_PATH=\"$(abspath $(NET))\" \
+	  -o littleindian $^
+	echo -e "bench 12\nquit" | ./littleindian
+	$(CXX) $(CXXFLAGS) -march=native -fprofile-use -fprofile-correction \
+	  -DEMBEDDED_NET_PATH=\"$(abspath $(NET))\" \
+	  -o littleindian $^
+	rm -f *.gcda
+	@echo "pgo-embed: build final em ./littleindian"
+
+clean:
+	rm -f littleindian littleindian.o *.gcda littleindian.pgo-gen
+
+.PHONY: f1 native-embed avx2-embed avx512-embed pgo-embed clean
