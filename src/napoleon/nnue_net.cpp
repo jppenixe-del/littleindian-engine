@@ -45,10 +45,13 @@ static inline int makeThreatFull(int side, int rel, int att, int vic, int sq) {
 }
 static constexpr int   FEATURES_PER_KB  = 704;
 static constexpr int   MATERIAL_BUCKETS = 8;
-// 🦅 OUTPUT_SCALE_CP: out (≈cp_SF/400 do treino) × isto = score em unidades-Sirius. O Sirius usa
-//   NormalizeToPawnValue=102 (102 = 1 peão). P/ alinhar EXATO: 400 × 102/100 = 408 (era 410, ~0.5%
-//   off). Assim os scores da NNUE batem com as margens de poda do Sirius (futility/LMR em 102/peão).
-static constexpr float OUTPUT_SCALE_CP  = 408.0f;
+// 🦅 OUTPUT_SCALE_CP: out (≈cp_SF/400 do treino) × isto = score em cp. Era 408 (= 400×102/100,
+//   alinhado à convenção NormalizeToPawnValue=102 do Sirius) — já não há ligação com o Sirius
+//   (2026-06-18), por isso passa a bater exatamente com a escala real de treino (400), sem
+//   fator de conversão nenhum. As margens de poda em search.cpp que estavam pré-escaladas por
+//   408/400 foram revertidas ao mesmo tempo (ver commits do mesmo dia) — mudar isto sem rever
+//   essas margens em conjunto descalibra a poda.
+static constexpr float OUTPUT_SCALE_CP  = 400.0f;
 
 static constexpr int BULLET_L1 = 16, BULLET_L2 = 32;
 static constexpr int SMALL_L1  = 32, SMALL_L2  = 32;

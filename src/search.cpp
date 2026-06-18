@@ -111,7 +111,7 @@ static void updateCorrHist(const Board& board, int rawEval, int bestScore) {
 
 // ─── Move ordering ──────────────────────────────────────────────────────
 static const int kPieceValue[6] = { 100, 325, 325, 500, 975, 20000 };
-static int DELTA_MARGIN = 359;  // 352 (Coda QS_DELTA_MARGIN) × 408/400
+static int DELTA_MARGIN = 352;  // Coda QS_DELTA_MARGIN (OUTPUT_SCALE_CP=400 now, no 408/400 rescale needed)
 static thread_local int gHistory[2][64][64];
 static thread_local int gCaptureHistory[2][6][6];   // [lado][atacante][vítima] — bónus/malus de capturas
 
@@ -439,11 +439,11 @@ static int RAZOR_BASE = 300;
 static int RAZOR_MULT = 300;
 
 // ─── Reverse Futility Pruning ──────────────────────────────────────────────
-// Magnitude informada pelo Coda (RFP_MARGIN_NOIMP=43, escalado por
-// OUTPUT_SCALE_CP/400 = 408/400; sem flag "improving" ainda, por isso só
-// um valor). Por afinar com SPSA depois de validado.
+// Magnitude informada pelo Coda (RFP_MARGIN_NOIMP=43; sem rescale agora que
+// OUTPUT_SCALE_CP=400; sem flag "improving" ainda, por isso só um valor).
+// Por afinar com SPSA depois de validado.
 static int RFP_MAX_DEPTH = 7;
-static int RFP_MARGIN    = 44;  // 43 × 408/400
+static int RFP_MARGIN    = 43;  // OUTPUT_SCALE_CP=400 now, no 408/400 rescale needed
 
 // ─── Null Move Pruning ──────────────────────────────────────────────────────
 // NMP_BASE_R/NMP_DIV informados pelo Coda (7.8 / 7.5 → arredondado);
@@ -492,19 +492,19 @@ static int SE_MARGIN    = 64;
 // ─── Late Move Pruning ───────────────────────────────────────────────────
 // Magnitudes informadas pelo Coda (engine de referência mais próximo,
 // também 100% vibe-coded), constantes de profundidade/contagem sem escala
-// (não são cp); margens em cp escaladas por OUTPUT_SCALE_CP/400 = 408/400.
+// (não são cp); margens em cp sem rescale agora que OUTPUT_SCALE_CP=400.
 static int LMP_MAX_DEPTH = 8;
 static int LMP_BASE      = 6;
 static int LMP_MULT      = 1;
 
 // ─── Futility Pruning ───────────────────────────────────────────────────
 static int FUTILITY_MAX_DEPTH = 8;
-static int FUTILITY_BASE      = 82;   // 80 × 408/400
-static int FUTILITY_MARGIN    = 112;  // 110 × 408/400
+static int FUTILITY_BASE      = 80;   // OUTPUT_SCALE_CP=400 now, no 408/400 rescale needed
+static int FUTILITY_MARGIN    = 110;  // OUTPUT_SCALE_CP=400 now, no 408/400 rescale needed
 
 // ─── SEE Pruning ────────────────────────────────────────────────────────
 static int SEE_PRUNE_MAX_DEPTH = 7;
-static int SEE_PRUNE_MARGIN    = 219; // 215 × 408/400
+static int SEE_PRUNE_MARGIN    = 215; // OUTPUT_SCALE_CP=400 now, no 408/400 rescale needed
 
 // ─── History Pruning ────────────────────────────────────────────────────
 static int HIST_PRUNE_MAX_DEPTH = 8;
