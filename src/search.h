@@ -24,6 +24,7 @@ struct SearchInfo {
     int64_t  timeLimitMs = 0;  // hard stop
     int64_t  softLimitMs = 0;  // soft stop (check after root)
     uint64_t nodeLimit  = 0;   // "go nodes N" (0 = sem limite)
+    int      selDepth  = 0;    // maior ply visitado nesta iteração (qsearch incluída) — campo UCI "seldepth"
 };
 
 // Score constants

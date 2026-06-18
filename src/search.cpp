@@ -385,6 +385,7 @@ static inline void evalPop(int ply) {
 static int qsearch(Board& board, int alpha, int beta, int ply, SearchInfo& info) {
     if (info.stopped || checkTime(info)) return 0;
     ++info.nodes;
+    if (ply > info.selDepth) info.selDepth = ply;
 
     int standPat = staticEval(board);
     if (standPat >= beta) return standPat;
@@ -543,6 +544,7 @@ static int search(Board& board, int depth, int alpha, int beta,
     if (depth <= 0) return qsearch(board, alpha, beta, ply, info);
 
     ++info.nodes;
+    if (ply > info.selDepth) info.selDepth = ply;
 
     // TT probe
     bool ttHit = false;
@@ -1014,6 +1016,7 @@ static void searchBody(Board& board, const Limits& limits, bool isMain, uint64_t
 
     for (int depth = 1; depth <= maxDepth; ++depth) {
         info.stopped = false;
+        info.selDepth = 0;  // recomeça a cada iteração (estilo Stockfish: seldepth é por depth, não cumulativo)
         gRootExcludedCount = 0;  // MultiPV: recomeça a exclusão a cada depth nova
 
         int score;
@@ -1087,8 +1090,8 @@ static void searchBody(Board& board, const Limits& limits, bool isMain, uint64_t
         }
 
         if (isMain) {
-            printf("info depth %d multipv 1 score %s nodes %llu nps %llu time %lld pv %s\n",
-                   depth, scoreStr, (unsigned long long)info.nodes,
+            printf("info depth %d seldepth %d multipv 1 score %s nodes %llu nps %llu time %lld pv %s\n",
+                   depth, info.selDepth, scoreStr, (unsigned long long)info.nodes,
                    (unsigned long long)nps, (long long)elapsed, pv);
             fflush(stdout);
         }
@@ -1136,8 +1139,8 @@ static void searchBody(Board& board, const Limits& limits, bool isMain, uint64_t
                 }
                 int64_t pvElapsed = nowMs() - info.startMs;
                 uint64_t pvNps = pvElapsed > 0 ? info.nodes * 1000 / pvElapsed : info.nodes;
-                printf("info depth %d multipv %d score %s nodes %llu nps %llu time %lld pv %s\n",
-                       depth, pvIdx + 1, pvScoreStr, (unsigned long long)info.nodes,
+                printf("info depth %d seldepth %d multipv %d score %s nodes %llu nps %llu time %lld pv %s\n",
+                       depth, info.selDepth, pvIdx + 1, pvScoreStr, (unsigned long long)info.nodes,
                        (unsigned long long)pvNps, (long long)pvElapsed, pvStr);
                 fflush(stdout);
 
