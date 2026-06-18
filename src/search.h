@@ -42,6 +42,9 @@ void search(Board& board, const Limits& limits, uint64_t* nodesOut = nullptr);
 void printTunableOptions();
 bool setTunableParam(const std::string& name, int value);
 
+// MultiPV (análise; OFF em jogo — default 1 = comportamento inalterado).
+void setMultiPV(int n);
+
 // Static Exchange Evaluation — exposta para validação (ver UCI "seetest").
 bool seeGE(const Board& board, Move m, int threshold);
 int  seeValue(const Board& board, Move m);

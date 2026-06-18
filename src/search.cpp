@@ -270,6 +270,14 @@ static Move     gRootMoves[256];
 static uint64_t gRootMoveNodes[256];
 static int      gRootMoveCount = 0;
 
+// MultiPV: lances de raiz já reportados nesta profundidade (excluídos da
+// próxima passada). gRootExcludedCount fica a 0 quando MultiPV=1 (default)
+// — comportamento idêntico ao de antes desta técnica existir.
+static Move gRootExcluded[8];
+static int  gRootExcludedCount = 0;
+static int  gMultiPV = 1;
+void setMultiPV(int n) { gMultiPV = std::max(1, std::min(8, n)); }
+
 // ─── Acumulador incremental (EvalState) ────────────────────────────────────
 // Liga o NapkAccSlot (nnue_net.h/cpp, já implementado mas nunca chamado) ao
 // makeMove/unmakeMove daqui — sem isto g_napkCurrentSlot fica sempre nullptr
@@ -646,6 +654,15 @@ static int search(Board& board, int depth, int alpha, int beta,
     for (int i = 0; i < sm.count; ++i) {
         Move m = sm.next(idx);
         if (!excludedMove.isNull() && m.data == excludedMove.data) continue;
+        // MultiPV (análise; off em jogo): exclui na RAIZ os lances já
+        // reportados nas linhas anteriores desta mesma profundidade — só
+        // gRootExcludedCount>0 quando MultiPV>1 está ativo (ver driver).
+        if (root && gRootExcludedCount > 0) {
+            bool excl = false;
+            for (int ei = 0; ei < gRootExcludedCount; ++ei)
+                if (m.data == gRootExcluded[ei].data) { excl = true; break; }
+            if (excl) continue;
+        }
         bool isQuiet = !m.isCapture() && !m.isPromo();
 
         // Late Move Pruning / Futility Pruning / History Pruning: só
@@ -958,6 +975,7 @@ void search(Board& board, const Limits& limits, uint64_t* nodesOut) {
 
     for (int depth = 1; depth <= maxDepth; ++depth) {
         info.stopped = false;
+        gRootExcludedCount = 0;  // MultiPV: recomeça a exclusão a cada depth nova
 
         int score;
         if (depth >= ASPIRATION_MIN_DEPTH && havePrevScore) {
@@ -1029,10 +1047,63 @@ void search(Board& board, const Limits& limits, uint64_t* nodesOut) {
             }
         }
 
-        printf("info depth %d score %s nodes %llu nps %llu time %lld pv %s\n",
+        printf("info depth %d multipv 1 score %s nodes %llu nps %llu time %lld pv %s\n",
                depth, scoreStr, (unsigned long long)info.nodes,
                (unsigned long long)nps, (long long)elapsed, pv);
         fflush(stdout);
+
+        // MultiPV (análise; gMultiPV=1 default → este bloco nunca corre,
+        // comportamento idêntico a antes desta técnica existir). Cada linha
+        // extra exclui da raiz os lances já reportados nesta profundidade —
+        // mesmo truque do excludedMove das extensões singulares, só que por
+        // um array de ficheiro (gRootExcluded) em vez de um parâmetro, para
+        // não tocar na assinatura de search() usada em todo o resto do código.
+        // ⚠️ LIMITAÇÃO CONHECIDA: como cada linha é uma busca de raiz à parte
+        // (não 1 busca só com N linhas extraídas da PV), gHistory/gContHist/TT
+        // ficam "contaminados" pelas passadas anteriores na MESMA depth — os
+        // scores das linhas 2+ por vezes não saem em ordem decrescente
+        // estrita. Inofensivo em jogo (MultiPV=1 nunca entra aqui), só afeta
+        // a leitura da análise. Corrigir a sério exigiria isolar o estado de
+        // ordenação por linha — fora do âmbito desta funcionalidade utilitária.
+        if (gMultiPV > 1 && !bestMove.isNull() && !info.stopped) {
+            gRootExcluded[0] = bestMove;
+            gRootExcludedCount = 1;
+            for (int pvIdx = 1; pvIdx < gMultiPV; ++pvIdx) {
+                int pvScore = search(board, depth, -INF_SCORE, INF_SCORE, 0, true, info);
+                if (info.stopped) break;
+
+                bool pvHit;
+                TTEntry* pvTte = gTT.probe(board.hash, pvHit);
+                Move pvMove = (pvHit && pvTte->move) ? Move(pvTte->move) : NULL_MOVE;
+                if (pvMove.isNull()) break;  // menos lances legais que MultiPV pedido
+
+                char pvScoreStr[32];
+                if (isMate(pvScore)) {
+                    int mateIn = (MATE_SCORE - std::abs(pvScore) + 1) / 2;
+                    snprintf(pvScoreStr, sizeof(pvScoreStr), "mate %d", pvScore > 0 ? mateIn : -mateIn);
+                } else {
+                    snprintf(pvScoreStr, sizeof(pvScoreStr), "cp %d", pvScore);
+                }
+                char pvStr[16] = {};
+                pvStr[0] = 'a' + (pvMove.from() & 7);
+                pvStr[1] = '1' + (pvMove.from() >> 3);
+                pvStr[2] = 'a' + (pvMove.to() & 7);
+                pvStr[3] = '1' + (pvMove.to() >> 3);
+                if (pvMove.isPromo()) {
+                    const char pc[] = "nbrq";
+                    pvStr[4] = pc[pvMove.flags() & 3];
+                }
+                int64_t pvElapsed = nowMs() - info.startMs;
+                uint64_t pvNps = pvElapsed > 0 ? info.nodes * 1000 / pvElapsed : info.nodes;
+                printf("info depth %d multipv %d score %s nodes %llu nps %llu time %lld pv %s\n",
+                       depth, pvIdx + 1, pvScoreStr, (unsigned long long)info.nodes,
+                       (unsigned long long)pvNps, (long long)pvElapsed, pvStr);
+                fflush(stdout);
+
+                gRootExcluded[gRootExcludedCount++] = pvMove;
+            }
+            gRootExcludedCount = 0;  // não afeta a próxima depth (já reposto no topo do for, dupla garantia)
+        }
 
         // Soft time check — modulado pelo WDL brain (opt-in, OFF por
         // defeito), pela best-move stability (lance estável há várias
