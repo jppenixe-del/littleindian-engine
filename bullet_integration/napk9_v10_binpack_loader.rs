@@ -23,10 +23,15 @@
 //
 //    USO no trainer: NapkBinpackLoader::new_concat_multiple(&paths, buffer_mb, threads, filter)
 //    onde filter: impl Fn(&TrainingDataEntry) -> bool + Clone + Send + Sync + 'static.
+//
+//    ⚠️ NOTA DE VERSÃO (confirmado lendo o checkout real em /mnt/c/data/env/bullet a 2026-06-18):
+//    o `main` do GitHub jw1912/bullet usa `bullet_trainer::reader::DataReader::read_chunks`;
+//    ESTE checkout local (mais antigo/diferente) usa `crate::value::loader::DataLoader` com
+//    `data_file_paths`/`count_positions`/`map_chunks` — mesma lógica interna, trait diferente.
+//    Implementado para a versão LOCAL (a que compila aqui), não para o `main` do GitHub.
 
 use std::{fs::File, sync::mpsc, thread};
 
-use bullet_trainer::reader::DataReader;
 use sfbinpack::CompressedTrainingDataEntryReader;
 pub use sfbinpack::{
     TrainingDataEntry,
@@ -34,6 +39,7 @@ pub use sfbinpack::{
 };
 
 use crate::napk9_v10::NapkRecordV2;
+use crate::value::loader::DataLoader;
 
 // ── PRNG sem dependências externas (mesmo xorshift64 que o bullet usa internamente em
 //    value/loader/rng.rs — não dá para importar de lá, é módulo privado, por isso copia-se). ──
@@ -116,11 +122,19 @@ impl<T: Fn(&TrainingDataEntry) -> bool> NapkBinpackLoader<T> {
     }
 }
 
-impl<T> DataReader<NapkRecordV2> for NapkBinpackLoader<T>
+impl<T> DataLoader<NapkRecordV2> for NapkBinpackLoader<T>
 where
     T: Fn(&TrainingDataEntry) -> bool + Clone + Send + Sync + 'static,
 {
-    fn read_chunks<F: FnMut(&[NapkRecordV2]) -> bool>(&self, _: usize, mut f: F) {
+    fn data_file_paths(&self) -> &[String] {
+        &self.file_paths
+    }
+
+    fn count_positions(&self) -> Option<u64> {
+        None
+    }
+
+    fn map_chunks<F: FnMut(&[NapkRecordV2]) -> bool>(&self, _: usize, mut f: F) {
         let file_paths = self.file_paths.clone();
         let buffer_size = self.buffer_size;
         let threads = self.threads;
