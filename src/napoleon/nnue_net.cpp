@@ -2109,50 +2109,75 @@ static int evaluateLI11Impl(const Board& board)
     const int32_t* accThem = (stm == 0) ? accB : accW;
     const int QAi = (int)g_li11.qa;
 
-    // 1) ativação em pares: clip [0,QA] em todo o L1, depois metade × metade.
-    //    Em float seria clip(x,0,1)*clip(y,0,1) (treino); aqui em inteiro: clip [0,QA],
-    //    produto, a div por QA mantém o resultado em [0,QA] (mesma escala à entrada do FC0).
+    // 1) ativação em pares: clip [0,QA] em todo o L1, multiplica metade×metade (permanece em
+    //    [0,QA]), depois rescala p/ [0,127] -- MESMA convenção do concat antigo (clip-rescale
+    //    com arredondo), para que o dequant do FC0 a seguir use a MESMA fórmula (s1/127) que
+    //    o runHead() antigo já usa e está validado.
     alignas(32) uint8_t concat[NAPK_MAX_L1 + 32] = {0};
     auto buildPaired = [&](const int32_t* acc, uint8_t* dst) {
         const int half = L1 / 2;
         for (int i = 0; i < half; ++i) {
             int a = std::clamp(acc[i],        0, QAi);
             int b = std::clamp(acc[i + half], 0, QAi);
-            int prod = (a * b) / QAi;   // permanece em [0,QA]
-            dst[i] = (uint8_t)std::clamp(prod, 0, 255);
+            int prod = (a * b) / QAi;                      // permanece em [0,QA]
+            int rescaled = (prod * 127 + QAi / 2) / QAi;    // -> [0,127], arredondado
+            dst[i] = (uint8_t)std::clamp(rescaled, 0, 127);
         }
     };
     buildPaired(accUs,   concat);            // [0, L1/2)       — perspetiva própria
     buildPaired(accThem, concat + L1 / 2);   // [L1/2, L1)      — perspetiva adversária
 
-    // 2) FC0: L1 → 33 (32 reais + 1 salto)
-    int32_t fc0_out[LI11_FC0_TOTAL];
-    li11Dense(g_li11.fc0_w.data(), g_li11.fc0_b.data(), concat, L1, LI11_FC0_TOTAL, fc0_out);
+    // 2) FC0: L1 → 33 (32 reais + 1 salto). Dot int8×uint8 (igual ao l1 antigo), depois
+    //    DEQUANTIZA para float — a partir daqui tudo em float, mesmo padrão do runHead()
+    //    antigo (a1/a2 já são float lá): evita requantizar entre camadas, mais simples e
+    //    já validado nesta base de código.
+    int32_t fc0_raw[LI11_FC0_TOTAL];
+    li11Dense(g_li11.fc0_w.data(), g_li11.fc0_b.data(), concat, L1, LI11_FC0_TOTAL, fc0_raw);
+    const float dequantFc0 = (1.0f / g_li11.qbFc) / 127.0f;
+    const float biasDequantFc0 = 1.0f / g_li11.qbFc;
+    float fc0_out[LI11_FC0_TOTAL];
+    for (int i = 0; i < LI11_FC0_TOTAL; ++i)
+        fc0_out[i] = (float)g_li11.fc0_b[i] * biasDequantFc0 + (float)(fc0_raw[i] - g_li11.fc0_b[i]) * dequantFc0;
+    // (fc0_raw já inclui o bias int32 -- subtrai-o antes do dequant da parte do dot, soma o
+    //  bias já dequantizado à parte. Ver li11Dense: out[o] = b[o] + dot, por isso isto separa
+    //  os dois termos para lhes dar escalas diferentes, exatamente como o l1 antigo faz.)
 
-    // 3) duas ativações nos 32 reais, concatenadas (64)
-    alignas(32) uint8_t concat64[64] = {0};
+    // 3) duas ativações nos 32 reais (float, [0,1]), concatenadas (64)
+    alignas(32) float concat64[64];
     for (int i = 0; i < LI11_FC0_REAL; ++i) {
-        int64_t sq = ((int64_t)fc0_out[i] * fc0_out[i]) / ((int64_t)g_li11.qbFc * g_li11.qbFc * 2);
-        concat64[i] = (uint8_t)std::clamp<int64_t>(sq, 0, 127);
-    }
-    for (int i = 0; i < LI11_FC0_REAL; ++i) {
-        int v = (int)(fc0_out[i] / g_li11.qbFc);
-        concat64[LI11_FC0_REAL + i] = (uint8_t)std::clamp(v, 0, 127);
+        float c = std::clamp(fc0_out[i], 0.0f, 1.0f);
+        concat64[i] = c * c;                         // ao quadrado-cortada
+        concat64[LI11_FC0_REAL + i] = c;              // cortada simples
     }
 
-    // 4) FC1: 64 → 32, cortada simples
-    int32_t fc1_raw[LI11_FC1_OUT];
-    li11Dense(g_li11.fc1_w.data(), g_li11.fc1_b.data(), concat64, 64, LI11_FC1_OUT, fc1_raw);
-    alignas(32) uint8_t fc1_act[LI11_FC1_OUT];
-    for (int i = 0; i < LI11_FC1_OUT; ++i)
-        fc1_act[i] = (uint8_t)std::clamp((int)(fc1_raw[i] / g_li11.qbFc), 0, 127);
+    // 4) FC1: 64 → 32, float, cortada simples
+    float fc1_out[LI11_FC1_OUT];
+    {
+        const float biasDequantFc1 = 1.0f / g_li11.qbFc;
+        const float wDequantFc1 = 1.0f / g_li11.qbFc;
+        for (int o = 0; o < LI11_FC1_OUT; ++o) {
+            const int8_t* w = &g_li11.fc1_w[(size_t)o * 64];
+            float dot = 0.0f;
+            for (int i = 0; i < 64; ++i) dot += (float)w[i] * concat64[i];
+            fc1_out[o] = std::clamp((float)g_li11.fc1_b[o] * biasDequantFc1 + dot * wDequantFc1, 0.0f, 1.0f);
+        }
+    }
 
-    // 5) FC2: 32 → 8 buckets, escolhe-se 1
-    int32_t fc2_out[MATERIAL_BUCKETS];
-    li11Dense(g_li11.fc2_w.data(), g_li11.fc2_b.data(), fc1_act, LI11_FC1_OUT, MATERIAL_BUCKETS, fc2_out);
+    // 5) FC2: 32 → 8 buckets (float, sem ativação -- é o valor final pré-soma)
+    float fc2_out[MATERIAL_BUCKETS];
+    {
+        const float biasDequantFc2 = 1.0f / g_li11.qbFc2;
+        const float wDequantFc2 = 1.0f / g_li11.qbFc2;  // fc2w TAMBÉM quantizado a qbFc2 (igual ao bias)
+        for (int o = 0; o < MATERIAL_BUCKETS; ++o) {
+            const int8_t* w = &g_li11.fc2_w[(size_t)o * LI11_FC1_OUT];
+            float dot = 0.0f;
+            for (int i = 0; i < LI11_FC1_OUT; ++i) dot += (float)w[i] * fc1_out[i];
+            fc2_out[o] = (float)g_li11.fc2_b[o] * biasDequantFc2 + dot * wDequantFc2;
+        }
+    }
 
-    // soma final: fc2(dequant ×qbFc2) + salto(dequant ×qbFc) + psqt(dequant ×qa)
-    float out = (float)fc2_out[bucket] / g_li11.qbFc2 + (float)fc0_out[LI11_FC0_REAL] / g_li11.qbFc;
+    // soma final: fc2 (já em float) + salto (fc0_out[32], float, SEM clamp) + psqt
+    float out = fc2_out[bucket] + fc0_out[LI11_FC0_REAL];
 
     float psqtBias = 0.0f;
     if (!g_li11.psqt.empty())
