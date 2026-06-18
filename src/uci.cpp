@@ -7,6 +7,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <cstdint>
+#include <cmath>
 #include <string>
 #include <sstream>
 #include <iostream>
@@ -126,6 +128,51 @@ void uci::parsePosition(Board& board, const std::string& line) {
             Move m = parseMove(board, token);
             if (!m.isNull()) board.makeMove(m);
         }
+    }
+}
+
+// ─── Diagnóstico de convergência entre cabeças (UCI "headconverge") ───────
+// Percorre lances legais até `depth` plies a partir de cada FEN de arranque,
+// chama evaluateAllHeads() em cada nó (1× acumulador, 3 cabeças) e acumula
+// estatísticas bullet-vs-big e small-vs-big: correlação, erro médio absoluto,
+// % de acordo sobre quem está a ganhar, % dentro de 50cp. Puramente
+// diagnóstico — não altera o caminho de avaliação usado em busca real.
+struct HeadConvergeStats {
+    int64_t n = 0;
+    double sumBig = 0, sumOther = 0, sumBigOther = 0, sumBig2 = 0, sumOther2 = 0;
+    int64_t sameSign = 0, within50 = 0;
+    void add(int big, int other) {
+        ++n;
+        sumBig += big; sumOther += other; sumBigOther += (double)big * other;
+        sumBig2 += (double)big * big; sumOther2 += (double)other * other;
+        if ((big >= 0) == (other >= 0)) ++sameSign;
+        if (std::abs(big - other) <= 50) ++within50;
+    }
+    double correlation() const {
+        if (n < 2) return 0.0;
+        double cov = sumBigOther / n - (sumBig / n) * (sumOther / n);
+        double varBig = sumBig2 / n - (sumBig / n) * (sumBig / n);
+        double varOther = sumOther2 / n - (sumOther / n) * (sumOther / n);
+        double denom = std::sqrt(std::max(0.0, varBig) * std::max(0.0, varOther));
+        return denom > 1e-9 ? cov / denom : 0.0;
+    }
+};
+
+static void headConvergeWalk(Board& board, int depth, HeadConvergeStats& bulletVsBig, HeadConvergeStats& smallVsBig) {
+    int bullet, small, big;
+    napoleon::nnue::evaluateAllHeads(board, bullet, small, big);
+    bulletVsBig.add(big, bullet);
+    smallVsBig.add(big, small);
+    if (depth <= 0) return;
+
+    MoveList list;
+    generateMoves(board, list);
+    for (int i = 0; i < list.count; ++i) {
+        Move m = list.moves[i];
+        if (!board.isLegal(m)) continue;
+        board.makeMove(m);
+        headConvergeWalk(board, depth - 1, bulletVsBig, smallVsBig);
+        board.unmakeMove(m);
     }
 }
 
@@ -258,6 +305,32 @@ void uci::loop() {
             if (ss >> tok) depth = std::stoi(tok);
             int mismatches = napkIncrementalSelfTest(board, depth);
             std::printf("incrtest: %d posicoes divergentes (depth=%d, 0=ok)\n", mismatches, depth);
+        } else if (cmd == "headconverge") {
+            int depth = 4;
+            std::string tok;
+            if (ss >> tok) depth = std::stoi(tok);
+            static const char* CONVERGE_FENS[] = {
+                "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+                "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1",
+                "8/2p5/3p4/KP5r/1R3p1k/8/4P1P1/8 w - - 0 1",
+                "rnbq1k1r/pp1Pbppp/2p5/8/2B5/8/PPP1NnPP/RNBQK2R w KQ - 1 8",
+                nullptr
+            };
+            HeadConvergeStats bulletVsBig, smallVsBig;
+            for (int i = 0; CONVERGE_FENS[i]; ++i) {
+                Board b;
+                b.setFen(CONVERGE_FENS[i]);
+                headConvergeWalk(b, depth, bulletVsBig, smallVsBig);
+            }
+            std::printf("headconverge (depth=%d, n=%lld posicoes):\n", depth, (long long)bulletVsBig.n);
+            std::printf("  bullet vs big: corr=%.3f  acordo-sinal=%.1f%%  dentro-50cp=%.1f%%\n",
+                bulletVsBig.correlation(),
+                100.0 * bulletVsBig.sameSign / std::max<int64_t>(1, bulletVsBig.n),
+                100.0 * bulletVsBig.within50 / std::max<int64_t>(1, bulletVsBig.n));
+            std::printf("  small  vs big: corr=%.3f  acordo-sinal=%.1f%%  dentro-50cp=%.1f%%\n",
+                smallVsBig.correlation(),
+                100.0 * smallVsBig.sameSign / std::max<int64_t>(1, smallVsBig.n),
+                100.0 * smallVsBig.within50 / std::max<int64_t>(1, smallVsBig.n));
         } else if (cmd == "seetest") {
             // Valores esperados calculados para a nossa tabela de peças
             // (P=100, N=325, B=325, R=500, Q=975) — algoritmo validado

@@ -1032,6 +1032,115 @@ static inline void fuseI16intoI32(int32_t* acc32, const int16_t* acc16, int L1)
 
 
 
+// 🦅 Computa só a parte ESPECÍFICA de uma cabeça (densas l1→l2→l3) sobre um
+//   `concat`/`bucket` já prontos (a parte cara — acumulador+threats — é
+//   PARTILHADA pelas 3 cabeças, calculada uma só vez por quem chama). Extraído
+//   de evaluate() sem mudar nada da matemática/SIMD, só para o reaproveitar em
+//   evaluateAllHeads() (medir convergência bullet/small/big sem pagar 3×
+//   acumulador). `concat` não é const por causa do hack de debug ZERO_CONCAT,
+//   que evaluate() já aplica antes de chamar — chamadas múltiplas (uma por
+//   cabeça) sobre o MESMO concat não voltam a zerar nada.
+static float runHead(const Head& h, int bucket, const uint8_t* concat, int l1_in)
+{
+    int l1_out = h.l1_out, l2_out = h.l2_out;
+    float s1 = h.l1_scale[bucket], s2 = h.l2_scale[bucket], s3 = h.l3_scale[bucket];
+    float dequant1 = s1 / 127.0f;
+    float dequant2 = s2;
+    float dequant3 = s3;
+
+    alignas(32) float a1[MAX_L1];
+    const int8_t*  l1w_base = h.l1_w[bucket].data();
+    const float*   l1b_base = h.l1_b[bucket].data();
+    for (int o = 0; o < l1_out; ++o)
+    {
+        const int8_t* w = &l1w_base[(size_t)o * l1_in];
+        int64_t sum = 0;
+        int i = 0;
+
+        #if defined(__AVX2__)
+        __m256i sum_v = _mm256_setzero_si256();
+        for (; i <= l1_in - 32; i += 32) {
+            __m256i c_v = _mm256_loadu_si256((const __m256i*)&concat[i]);
+            __m256i w_v = _mm256_loadu_si256((const __m256i*)&w[i]);
+            #if defined(__AVX512VNNI__) || defined(__AVXVNNI__)
+            sum_v = _mm256_dpbusd_epi32(sum_v, c_v, w_v);
+            #else
+            __m256i madd = _mm256_maddubs_epi16(c_v, w_v);
+            __m256i low = _mm256_cvtepi16_epi32(_mm256_castsi256_si128(madd));
+            __m256i high = _mm256_cvtepi16_epi32(_mm256_extracti128_si256(madd, 1));
+            sum_v = _mm256_add_epi32(sum_v, low);
+            sum_v = _mm256_add_epi32(sum_v, high);
+            #endif
+        }
+        int32_t buffer[8];
+        _mm256_storeu_si256((__m256i*)buffer, sum_v);
+        sum += buffer[0] + buffer[1] + buffer[2] + buffer[3] + buffer[4] + buffer[5] + buffer[6] + buffer[7];
+        #elif defined(__ARM_NEON)
+        int32x4_t sum_v = vdupq_n_s32(0);
+        for (; i <= l1_in - 16; i += 16) {
+            uint8x16_t c_v = vld1q_u8(&concat[i]);
+            int8x16_t w_v = vld1q_s8(&w[i]);
+            int16x8_t low16 = vmovl_s8(vget_low_s8(w_v));
+            uint16x8_t c_low16 = vmovl_u8(vget_low_u8(c_v));
+            int16x8_t high16 = vmovl_s8(vget_high_s8(w_v));
+            uint16x8_t c_high16 = vmovl_u8(vget_high_u8(c_v));
+            sum_v = vmlal_s16(sum_v, vget_low_s16(low16), vreinterpret_s16_u16(vget_low_u16(c_low16)));
+            sum_v = vmlal_s16(sum_v, vget_high_s16(low16), vreinterpret_s16_u16(vget_high_u16(c_low16)));
+            sum_v = vmlal_s16(sum_v, vget_low_s16(high16), vreinterpret_s16_u16(vget_low_u16(c_high16)));
+            sum_v = vmlal_s16(sum_v, vget_high_s16(high16), vreinterpret_s16_u16(vget_high_u16(c_high16)));
+        }
+        sum += vgetq_lane_s32(sum_v, 0) + vgetq_lane_s32(sum_v, 1) + vgetq_lane_s32(sum_v, 2) + vgetq_lane_s32(sum_v, 3);
+        #endif
+
+        for (; i < l1_in; ++i) sum += (int)concat[i] * (int)w[i];
+        a1[o] = std::clamp(l1b_base[o] + (float)sum * dequant1, 0.0f, 1.0f);
+    }
+
+    alignas(32) float a2[256];
+    for (int o = 0; o < l2_out; ++o)
+    {
+        const int8_t* w = &h.l2_w[bucket][(size_t)o * l1_out];
+        float dot = 0.0f;
+        int i = 0;
+        #if defined(__AVX2__)
+        __m256 dot_v = _mm256_setzero_ps();
+        for (; i <= l1_out - 8; i += 8) {
+            __m128i w_bytes = _mm_loadl_epi64((const __m128i*)&w[i]);
+            __m256i w_ints = _mm256_cvtepi8_epi32(w_bytes);
+            __m256 w_floats = _mm256_cvtepi32_ps(w_ints);
+            __m256 a1_v = _mm256_loadu_ps(&a1[i]);
+            dot_v = _mm256_fmadd_ps(w_floats, a1_v, dot_v);
+        }
+        float buf_f[8]; _mm256_storeu_ps(buf_f, dot_v);
+        dot += buf_f[0] + buf_f[1] + buf_f[2] + buf_f[3] + buf_f[4] + buf_f[5] + buf_f[6] + buf_f[7];
+        #endif
+        for (; i < l1_out; ++i) dot += (float)w[i] * a1[i];
+        a2[o] = std::clamp(h.l2_b[bucket][o] + dot * dequant2, 0.0f, 1.0f);
+    }
+
+    float out = h.l3_b[bucket];
+    {
+        const int8_t* w = &h.l3_w[bucket][0];
+        float dot3 = 0.0f;
+        int i = 0;
+        #if defined(__AVX2__)
+        __m256 dot_v3 = _mm256_setzero_ps();
+        for (; i <= l2_out - 8; i += 8) {
+            __m128i w_bytes = _mm_loadl_epi64((const __m128i*)&w[i]);
+            __m256i w_ints = _mm256_cvtepi8_epi32(w_bytes);
+            __m256 w_floats = _mm256_cvtepi32_ps(w_ints);
+            __m256 a2_v = _mm256_loadu_ps(&a2[i]);
+            dot_v3 = _mm256_fmadd_ps(w_floats, a2_v, dot_v3);
+        }
+        float buf_f3[8]; _mm256_storeu_ps(buf_f3, dot_v3);
+        dot3 += buf_f3[0] + buf_f3[1] + buf_f3[2] + buf_f3[3] + buf_f3[4] + buf_f3[5] + buf_f3[6] + buf_f3[7];
+        #endif
+        for (; i < l2_out; ++i) dot3 += (float)w[i] * a2[i];
+        out += dot3 * dequant3;
+    }
+    return out;
+}
+
 int evaluate(const Board& board, int headIdx)
 {
     if (!g_net.loaded) return 0;
@@ -1213,125 +1322,10 @@ int evaluate(const Board& board, int headIdx)
     const Head& h = (g_net.has3heads && headIdx == HEAD_BULLET) ? g_net.bullet
                   : (g_net.has3heads && headIdx == HEAD_SMALL)  ? g_net.small
                   :                                               g_net.big;
-    int l1_in = L1 * 2, l1_out = h.l1_out, l2_out = h.l2_out;
+    int l1_in = L1 * 2;
     if (getenv("ZERO_CONCAT")) for(int i=0;i<l1_in;++i) concat[i]=0;
 
-    float s1 = h.l1_scale[bucket], s2 = h.l2_scale[bucket], s3 = h.l3_scale[bucket];
-    // 🦅 FIX ESCALA DA CABEÇA (validado por forward de referência numpy contra o .napk9):
-    //   A escala ANTIGA (s1/127/127, s2/127, s3/127) estava ERRADA — produzia out≈const
-    //   (~0.03), deixando a cabeça big efetivamente MORTA: o eval vinha quase só do PSQT,
-    //   Q-vs-R dava 8cp, e os threat inputs não tinham efeito nenhum.
-    //   Derivação: concat=acc×127 (acc∈[0,1]), l1_w=W×QB → sum=(acc·W)×127×QB →
-    //   contrib = sum/(127×QB) = sum × (s1/127), com s1=1/QB. As camadas 2 e 3 recebem
-    //   a1/a2 JÁ em [0,1] (não ×127), logo sum=(a·W)×QB → contrib = sum × s (s=1/QB).
-    //   Referência float = -0.006288 ; NOVA escala = -0.005770 (Δ=0.0005, ruído de quant).
-    float dequant1 = s1 / 127.0f;       // = 1/(127·QB) — input concat está ×127
-    float dequant2 = s2;                // = 1/QB — a1 já em [0,1]
-    float dequant3 = s3;                // = 1/QB — a2 já em [0,1]
-
-    // 🦅 OPTIM : a1, a2 sur la pile (l1_out≤64, l2_out≤96)
-    // Hoist du pointeur de base hors de la boucle o (évite l'indirection vector
-    // h.l1_w[bucket] répétée à chaque sortie → réduit les accès mémoire).
-    // 🦅 FIX CRÍTICO: a1 tem de aguentar l1_out, que para a big head = L1 (256, 512,
-    //   1024...). Estava a1[64] → buffer overflow de 192+ floats na stack quando
-    //   l1_out=256, corrompendo o cálculo da cabeça (out vinha lixo, threats sem efeito).
-    //   Dimensiono para o máximo razoável (1024) com alinhamento para o SIMD.
-    alignas(32) float a1[MAX_L1];
-    const int8_t*  l1w_base = h.l1_w[bucket].data();
-    const float*   l1b_base = h.l1_b[bucket].data();
-    for (int o = 0; o < l1_out; ++o)
-    {
-        const int8_t* w = &l1w_base[(size_t)o * l1_in];
-        int64_t sum = 0;
-        int i = 0;
-
-        #if defined(__AVX2__)
-        __m256i sum_v = _mm256_setzero_si256();
-        for (; i <= l1_in - 32; i += 32) {
-            __m256i c_v = _mm256_loadu_si256((const __m256i*)&concat[i]);
-            __m256i w_v = _mm256_loadu_si256((const __m256i*)&w[i]);
-            #if defined(__AVX512VNNI__) || defined(__AVXVNNI__)
-            // 🦅 VNNI : produit scalaire uint8×int8 → int32 en UNE instruction.
-            sum_v = _mm256_dpbusd_epi32(sum_v, c_v, w_v);
-            #else
-            // Fallback (pas de VNNI) : maddubs + madd + add (3 instructions).
-            __m256i madd = _mm256_maddubs_epi16(c_v, w_v);
-            __m256i low = _mm256_cvtepi16_epi32(_mm256_castsi256_si128(madd));
-            __m256i high = _mm256_cvtepi16_epi32(_mm256_extracti128_si256(madd, 1));
-            sum_v = _mm256_add_epi32(sum_v, low);
-            sum_v = _mm256_add_epi32(sum_v, high);
-            #endif
-        }
-        int32_t buffer[8];
-        _mm256_storeu_si256((__m256i*)buffer, sum_v);
-        sum += buffer[0] + buffer[1] + buffer[2] + buffer[3] + buffer[4] + buffer[5] + buffer[6] + buffer[7];
-        #elif defined(__ARM_NEON)
-        int32x4_t sum_v = vdupq_n_s32(0);
-        for (; i <= l1_in - 16; i += 16) {
-            uint8x16_t c_v = vld1q_u8(&concat[i]);
-            int8x16_t w_v = vld1q_s8(&w[i]);
-            int16x8_t low16 = vmovl_s8(vget_low_s8(w_v));
-            uint16x8_t c_low16 = vmovl_u8(vget_low_u8(c_v));
-            int16x8_t high16 = vmovl_s8(vget_high_s8(w_v));
-            uint16x8_t c_high16 = vmovl_u8(vget_high_u8(c_v));
-            sum_v = vmlal_s16(sum_v, vget_low_s16(low16), vreinterpret_s16_u16(vget_low_u16(c_low16)));
-            sum_v = vmlal_s16(sum_v, vget_high_s16(low16), vreinterpret_s16_u16(vget_high_u16(c_low16)));
-            sum_v = vmlal_s16(sum_v, vget_low_s16(high16), vreinterpret_s16_u16(vget_low_u16(c_high16)));
-            sum_v = vmlal_s16(sum_v, vget_high_s16(high16), vreinterpret_s16_u16(vget_high_u16(c_high16)));
-        }
-        sum += vgetq_lane_s32(sum_v, 0) + vgetq_lane_s32(sum_v, 1) + vgetq_lane_s32(sum_v, 2) + vgetq_lane_s32(sum_v, 3);
-        #endif
-
-        for (; i < l1_in; ++i) sum += (int)concat[i] * (int)w[i];
-        a1[o] = std::clamp(l1b_base[o] + (float)sum * dequant1, 0.0f, 1.0f);
-    }
-
-    alignas(32) float a2[256];   // l2_out ≤ 96; folga para alinhamento SIMD
-    for (int o = 0; o < l2_out; ++o)
-    {
-        const int8_t* w = &h.l2_w[bucket][(size_t)o * l1_out];
-        float dot = 0.0f;
-        int i = 0;
-        #if defined(__AVX2__)
-        __m256 dot_v = _mm256_setzero_ps();
-        for (; i <= l1_out - 8; i += 8) {
-            // 🦅 FIX s29 (crash HEAD_BULLET): loadu_si128 lia 16 bytes mas o cvtepi8_epi32
-            //   só consome 8 → over-read de 8B; com a bullet head (l1_out=16), na ÚLTIMA row
-            //   do último bucket lia para lá do heap → SIGILL com PureBulletDepth>0.
-            //   loadl_epi64 carrega EXATAMENTE os 8 bytes usados. Matemática inalterada.
-            __m128i w_bytes = _mm_loadl_epi64((const __m128i*)&w[i]);
-            __m256i w_ints = _mm256_cvtepi8_epi32(w_bytes);
-            __m256 w_floats = _mm256_cvtepi32_ps(w_ints);
-            __m256 a1_v = _mm256_loadu_ps(&a1[i]);
-            dot_v = _mm256_fmadd_ps(w_floats, a1_v, dot_v);
-        }
-        float buf_f[8]; _mm256_storeu_ps(buf_f, dot_v);
-        dot += buf_f[0] + buf_f[1] + buf_f[2] + buf_f[3] + buf_f[4] + buf_f[5] + buf_f[6] + buf_f[7];
-        #endif
-        for (; i < l1_out; ++i) dot += (float)w[i] * a1[i];
-        a2[o] = std::clamp(h.l2_b[bucket][o] + dot * dequant2, 0.0f, 1.0f);
-    }
-
-    float out = h.l3_b[bucket];
-    {
-        const int8_t* w = &h.l3_w[bucket][0];
-        float dot3 = 0.0f;
-        int i = 0;
-        #if defined(__AVX2__)
-        __m256 dot_v3 = _mm256_setzero_ps();
-        for (; i <= l2_out - 8; i += 8) {
-            __m128i w_bytes = _mm_loadl_epi64((const __m128i*)&w[i]);   // 🦅 FIX s29: 8B exatos (ver L2)
-            __m256i w_ints = _mm256_cvtepi8_epi32(w_bytes);
-            __m256 w_floats = _mm256_cvtepi32_ps(w_ints);
-            __m256 a2_v = _mm256_loadu_ps(&a2[i]);
-            dot_v3 = _mm256_fmadd_ps(w_floats, a2_v, dot_v3);
-        }
-        float buf_f3[8]; _mm256_storeu_ps(buf_f3, dot_v3);
-        dot3 += buf_f3[0] + buf_f3[1] + buf_f3[2] + buf_f3[3] + buf_f3[4] + buf_f3[5] + buf_f3[6] + buf_f3[7];
-        #endif
-        for (; i < l2_out; ++i) dot3 += (float)w[i] * a2[i];
-        out += dot3 * dequant3;
-    }
+    float out = runHead(h, bucket, concat, l1_in);
 
     float psqtBias = 0.0f;
     if (!g_net.psqt.empty())
@@ -1383,6 +1377,160 @@ int evaluate(const Board& board, int headIdx)
     }
 
     return std::clamp(score, -3000, 3000);
+}
+
+// 🦅 Resolve o acumulador+threats+concat UMA SÓ VEZ (a parte cara, igual à de
+//   evaluate()) e aplica as 3 cabeças (bullet/small/big) sobre o MESMO concat
+//   — custo extra é só 3× as densas pequenas (16-32 neurónios), não 3×
+//   acumulador. Para medir convergência entre cabeças (UCI "headconverge"),
+//   não para ganhar NPS em jogo (esse ganho não existe por esta via — ver
+//   a conversa que motivou isto: a parte cara é partilhada de qualquer forma).
+void evaluateAllHeads(const Board& board, int& bulletScore, int& smallScore, int& bigScore)
+{
+    if (!g_net.loaded) { bulletScore = smallScore = bigScore = 0; return; }
+
+    const int L1 = g_net.L1;
+    const int stm = static_cast<int>(board.sideToMove());
+
+    int kw = board.kingSq(Color::WHITE).value();
+    int kb = board.kingSq(Color::BLACK).value();
+    int b_w = BUCKET_MAP[kw];
+    int b_b = BUCKET_MAP[kb ^ 56];
+
+    if (tl_finny.L1 != L1) {
+        tl_finny.L1 = L1;
+        for (int p = 0; p < 2; ++p) for (int b = 0; b < 32; ++b) tl_finny.e[p][b].init = false;
+    }
+    alignas(32) int32_t accW[MAX_L1], accB[MAX_L1];
+    NapkAccSlot* slot = (g_napkIncremental && g_napkCurrentSlot)
+        ? const_cast<NapkAccSlot*>(&g_napkCurrentSlot[g_netIdx]) : nullptr;
+    if (slot && slot->valid && slot->bucketW == b_w && slot->bucketB == b_b) {
+        napkMaterialize(board, slot);
+        std::memcpy(accW, slot->accW, sizeof(int32_t) * L1);
+        std::memcpy(accB, slot->accB, sizeof(int32_t) * L1);
+        if (g_napkIncremental && g_net.fullThreats)
+            napkMaterializeThreats(board, slot);
+    } else {
+        plyResolve(board, L1, b_w, b_b, accW, accB);
+    }
+    if (g_net.hasThreats && g_threatsEnabled)
+    {
+        alignas(32) int16_t thrW[MAX_L1]; alignas(32) int16_t thrB[MAX_L1];
+        bool usedSlotThreats = false;
+        if (g_napkIncremental && g_net.fullThreats && slot && slot->thrValid
+            && slot->bucketW == b_w && slot->bucketB == b_b)
+        {
+            std::memcpy(thrW, slot->thrAccW, sizeof(int16_t) * L1);
+            std::memcpy(thrB, slot->thrAccB, sizeof(int16_t) * L1);
+            usedSlotThreats = true;
+        }
+        else
+            for (int i = 0; i < L1; ++i) { thrW[i] = 0; thrB[i] = 0; }
+        if (!usedSlotThreats && g_net.fullThreats)
+        {
+            int thr[512];
+            Bitboard attackedBy[2][6];
+            computeAttackMapsByType(board, attackedBy);
+            int nW = gatherThreatsFull(board, 0, thr, attackedBy);
+            for (int k = 0; k < nW; ++k) addThreatRowI16(thrW, &g_net.threatWeight[(size_t)thr[k] * L1], L1);
+            int nB = gatherThreatsFull(board, 1, thr, attackedBy);
+            for (int k = 0; k < nB; ++k) addThreatRowI16(thrB, &g_net.threatWeight[(size_t)thr[k] * L1], L1);
+        }
+        else if (!usedSlotThreats)
+        {
+            int thr[THREAT_FEATURES];
+            Bitboard attacked[2];
+            computeAttackMaps(board, attacked);
+            int nW = gatherThreats(board, 0, thr, attacked);
+            for (int k = 0; k < nW; ++k) addThreatRowI16(thrW, &g_net.threatWeight[(size_t)thr[k] * L1], L1);
+            int nB = gatherThreats(board, 1, thr, attacked);
+            for (int k = 0; k < nB; ++k) addThreatRowI16(thrB, &g_net.threatWeight[(size_t)thr[k] * L1], L1);
+        }
+        fuseI16intoI32(accW, thrW, L1);
+        fuseI16intoI32(accB, thrB, L1);
+    }
+
+    int pieceCount = 0;
+    int white_queens = 0, black_queens = 0, white_rooks = 0, black_rooks = 0;
+    int white_minors = 0, black_minors = 0;
+    for (int c = 0; c < 2; ++c)
+        for (int t = 0; t < 6; ++t) {
+            int n = board.pieces(static_cast<Color>(c), static_cast<PieceType>(t)).popcount();
+            pieceCount += n;
+            if (c == 0) {
+                if (t == 4) white_queens += n;
+                else if (t == 3) white_rooks += n;
+                else if (t == 1 || t == 2) white_minors += n;
+            } else {
+                if (t == 4) black_queens += n;
+                else if (t == 3) black_rooks += n;
+                else if (t == 1 || t == 2) black_minors += n;
+            }
+        }
+    int bucket = materialBucket(pieceCount);
+
+    const int32_t* accUs   = (stm == 0) ? accW : accB;
+    const int32_t* accThem = (stm == 0) ? accB : accW;
+    const float QA = g_net.qa;
+    alignas(32) uint8_t concat[2 * NAPK_MAX_L1 + 32];
+    const int QAi = (int)QA;
+    {
+        const int scaleMul = (int)std::lround(127.0 / QAi * 65536.0);
+        const int32_t* srcs[2] = { accUs, accThem };
+        for (int half = 0; half < 2; ++half) {
+            const int32_t* a = srcs[half];
+            uint8_t* d = concat + half * L1;
+            for (int i = 0; i < L1; ++i) {
+                int x = a[i]; if (x < 0) x = 0; if (x > QAi) x = QAi;
+                d[i] = (uint8_t)((x * scaleMul + 32768) >> 16);
+            }
+        }
+    }
+    int l1_in = L1 * 2;
+
+    float psqtBias = 0.0f;
+    if (!g_net.psqt.empty()) {
+        int64_t psW = 0, psB = 0;
+        for (int c = 0; c < 2; ++c)
+            for (int t = 0; t < 6; ++t) {
+                Bitboard bb = board.pieces(static_cast<Color>(c), static_cast<PieceType>(t));
+                while (bb.any()) {
+                    int sq = bb.poplsb().value();
+                    int pc = engCode(t, c);
+                    int kWk = pieceKindW(pc);
+                    if (kWk != -1) psW += g_net.psqt[(size_t)makeFeat(b_w, kWk, sq) * MATERIAL_BUCKETS + bucket];
+                    int kBk = pieceKindB(pc);
+                    if (kBk != -1) psB += g_net.psqt[(size_t)makeFeat(b_b, kBk, sq ^ 56) * MATERIAL_BUCKETS + bucket];
+                }
+            }
+        float psqtUs   = (stm == 0) ? (float)psW : (float)psB;
+        float psqtThem = (stm == 0) ? (float)psB : (float)psW;
+        psqtBias = ((psqtUs - psqtThem) / g_net.qa) / 2.0f;
+    }
+
+    int whiteKingPenalty = 0;
+    if (black_queens == 0 && (black_rooks > 0 || black_minors >= 2)) {
+        int rank = kw / 8;
+        if (rank >= 2) whiteKingPenalty = 150 + (black_rooks * 50) + (black_minors * 25);
+    }
+    int blackKingPenalty = 0;
+    if (white_queens == 0 && (white_rooks > 0 || white_minors >= 2)) {
+        int rank = kb / 8;
+        if (rank <= 5) blackKingPenalty = 150 + (white_rooks * 50) + (white_minors * 25);
+    }
+
+    auto finalize = [&](float out) -> int {
+        int score = (int)std::lround((out + psqtBias) * OUTPUT_SCALE_CP);
+        if (stm == 0) score += (blackKingPenalty - whiteKingPenalty);
+        else          score += (whiteKingPenalty - blackKingPenalty);
+        return std::clamp(score, -3000, 3000);
+    };
+
+    const Head& hBullet = g_net.has3heads ? g_net.bullet : g_net.big;
+    const Head& hSmall  = g_net.has3heads ? g_net.small  : g_net.big;
+    bulletScore = finalize(runHead(hBullet, bucket, concat, l1_in));
+    smallScore  = finalize(runHead(hSmall,  bucket, concat, l1_in));
+    bigScore    = finalize(runHead(g_net.big, bucket, concat, l1_in));
 }
 static bool loadFromBytes(const std::vector<uint8_t>& buf)
 {

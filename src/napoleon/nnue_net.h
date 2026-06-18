@@ -36,6 +36,9 @@ bool isLoaded();
 enum HeadSel { HEAD_BULLET = 0, HEAD_SMALL = 1, HEAD_BIG = 2 };  // 🦅 cabeças 16/32/256
 int  evaluate(const Board& board);                 // usa a cabeça big (default)
 int  evaluate(const Board& board, int headIdx);    // 🦅 escolhe a cabeça (bullet/small/big)    // score cp, POV side-to-move
+// 🦅 as 3 cabeças sobre o MESMO acumulador (1× custo caro, não 3×) — p/ medir
+//   convergência entre cabeças (UCI "headconverge"), ver nnue_net.cpp.
+void evaluateAllHeads(const Board& board, int& bulletScore, int& smallScore, int& bigScore);
 int  verifyFinny(const Board& board); // 🦅 debug : diff finny vs complet (0=ok)
 // 🦅 Sistema DUAL (big 256 + small 128, ambas embebidas, alternância inteligente)
 bool loadSmall(const std::string& path);  // carrega a small de ficheiro
