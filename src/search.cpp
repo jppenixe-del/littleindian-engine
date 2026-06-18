@@ -299,6 +299,10 @@ static inline int mateBeta(int beta, int ply) {
 // ─── killers per ply ───────────────────────────────────────────────────────
 static int gKillers[128][2];
 
+// ─── Aspiration Windows ──────────────────────────────────────────────────
+static constexpr int ASPIRATION_MIN_DEPTH = 4;
+static constexpr int ASPIRATION_DELTA     = 16;
+
 // ─── Razoring ────────────────────────────────────────────────────────────
 static constexpr int RAZOR_BASE = 300;
 static constexpr int RAZOR_MULT = 300;
@@ -733,13 +737,39 @@ void search(Board& board, const Limits& limits) {
     if (maxDepth <= 0 || maxDepth > 64) maxDepth = 64;
     int avgScore = 0;
     bool haveAvgScore = false;
+    int prevScore = 0;
+    bool havePrevScore = false;
 
     for (int depth = 1; depth <= maxDepth; ++depth) {
         info.stopped = false;
 
-        int score = search(board, depth, -INF_SCORE, INF_SCORE, 0, true, info);
+        int score;
+        if (depth >= ASPIRATION_MIN_DEPTH && havePrevScore) {
+            // Janela estreita à volta do score da iteração anterior; alarga
+            // progressivamente (delta crescente) sempre que falha fora dela.
+            int delta = ASPIRATION_DELTA;
+            int alpha = std::max(prevScore - delta, -INF_SCORE);
+            int beta  = std::min(prevScore + delta, INF_SCORE);
+            for (;;) {
+                score = search(board, depth, alpha, beta, 0, true, info);
+                if (info.stopped) break;
+                if (score <= alpha) {
+                    alpha = std::max(score - delta, -INF_SCORE);
+                } else if (score >= beta) {
+                    beta = std::min(score + delta, INF_SCORE);
+                } else {
+                    break;
+                }
+                delta += delta / 2;
+            }
+        } else {
+            score = search(board, depth, -INF_SCORE, INF_SCORE, 0, true, info);
+        }
 
         if (info.stopped && depth > 1) break;  // discard incomplete iteration
+
+        prevScore = score;
+        havePrevScore = true;
 
         avgScore = haveAvgScore ? (score + avgScore) / 2 : score;
         haveAvgScore = true;
