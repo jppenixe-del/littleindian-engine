@@ -120,6 +120,8 @@ void napkRefresh(const Board& board, NapkAccSlot& slot);
 //   sem EvalState → nullptr → fallback seguro.
 void napkSetCurrentSlot(const NapkAccSlot* slot);   // chamado pelo push/pop do EvalState
 void napkSetIncremental(bool on);                   // 🦅 UCI NapkIncremental (A/B fallback)
+bool napkIncrementalEnabled();                      // estado atual da flag (p/ o search.cpp decidir
+                                                     //   se vale a pena montar o EvalState — 0 custo quando off)
 const NapkAccSlot* napkCurrentSlot();               // o slot atual (nullptr se fora de busca)
 
 // Parte 3: push incremental — calcula `dst` (slot do novo ply) a partir de `src` (slot do ply

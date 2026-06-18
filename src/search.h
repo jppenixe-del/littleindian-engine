@@ -35,3 +35,10 @@ void search(Board& board, const Limits& limits);
 // Static Exchange Evaluation — exposta para validação (ver UCI "seetest").
 bool seeGE(const Board& board, Move m, int threshold);
 int  seeValue(const Board& board, Move m);
+
+// Validação do acumulador incremental (ver UCI "incrtest"): percorre todos os
+// lances legais até `depth` plies, comparando o eval pelo caminho NOVO
+// (NapkAccSlot/EvalState) com o caminho ANTIGO (plyResolve, já confirmado por
+// "threattest"/verifyFinny) em CADA nó. Devolve o nº de posições onde
+// divergiram (0 = caminhos idênticos em toda a árvore percorrida).
+int napkIncrementalSelfTest(Board& board, int depth);

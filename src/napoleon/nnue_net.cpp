@@ -532,7 +532,10 @@ static thread_local int g_netIdx = 0;             // índice da rede ativa (0=bi
 // 🦅 Parte 3: ponteiro thread_local p/ o slot incremental atual (array napkAcc[2] do EvalState).
 //   Declarado AQUI (antes do evaluate) p/ o evaluate o ver. nullptr → fallback (finny).
 static thread_local const NapkAccSlot* g_napkCurrentSlot = nullptr;
-static bool g_napkIncremental = true;   // 🦅 UCI NapkIncremental: false força fallback (A/B de NPS)
+// 🦅 default false: search.cpp ligou o push/pop ao make/unmakeMove (2026-06-18), ainda por
+//   validar/SPRT — UCI NapkIncremental liga explicitamente (true) p/ testar; "setoption" abaixo
+//   espelha este default.
+static bool g_napkIncremental = false;
 static void napkMaterialize(const Board& board, NapkAccSlot* slot);   // fwd (def. mais abaixo)
 static void napkMaterializeThreats(const Board& board, NapkAccSlot* slot);   // 🦅 s29 fwd (threats incrementais)
 #define tl_finny (tl_finnyArr[g_netIdx])
@@ -1471,6 +1474,7 @@ bool dualLoaded() { return g_dualLoaded; }
 
 void napkSetCurrentSlot(const NapkAccSlot* slot) { g_napkCurrentSlot = slot; }
 void napkSetIncremental(bool on) { g_napkIncremental = on; }
+bool napkIncrementalEnabled() { return g_napkIncremental; }
 const NapkAccSlot* napkCurrentSlot() { return g_napkCurrentSlot; }
 // 🦅 LAZY UPDATE (estilo Stockfish): o push regista SÓ os deltas e a cadeia (barato, ~50 bytes).
 //   O acc só é calculado quando um evaluate o pede (napkMaterialize). Nós onde a busca corta antes

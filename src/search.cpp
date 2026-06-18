@@ -253,8 +253,77 @@ struct SortedMoves {
     }
 };
 
+// ─── Acumulador incremental (EvalState) ────────────────────────────────────
+// Liga o NapkAccSlot (nnue_net.h/cpp, já implementado mas nunca chamado) ao
+// makeMove/unmakeMove daqui — sem isto g_napkCurrentSlot fica sempre nullptr
+// e o evaluate cai sempre no caminho antigo (plyResolve/finny). O refresh
+// completo só acontece quando o rei muda de king-bucket (napkLazyPush trata
+// disso); de resto é só copiar o pai + aplicar os deltas do lance.
+static napoleon::nnue::NapkAccSlot gEvalSlots[260][2];   // [ply][0=big,1=small]
+
+struct MoveDelta {
+    napoleon::nnue::NapkDelta adds[2]; int nAdds = 0;
+    napoleon::nnue::NapkDelta rems[2]; int nRems = 0;
+};
+
+// Espelho exato dos ramos do Board::makeMove (board.cpp) — só extrai O QUE
+// muda, em vez de mudar. Chamar ANTES de board.makeMove(m): precisa do
+// estado pré-lance (pieceOn(from)/pieceOn(to) antes de mexer nas peças).
+static MoveDelta computeMoveDelta(const Board& board, Move m) {
+    MoveDelta d;
+    const int from = m.from(), to = m.to(), flags = m.flags();
+    const Color us = board.sideToMove(), them = ~us;
+    auto add = [&](Color c, PieceType pt, int sq) { d.adds[d.nAdds++] = {int(c), int(pt), sq}; };
+    auto rem = [&](Color c, PieceType pt, int sq) { d.rems[d.nRems++] = {int(c), int(pt), sq}; };
+    PieceType movingPt = board.pieceOn(from);
+
+    if (flags == Move::FLAG_CASTLE_K || flags == Move::FLAG_CASTLE_Q) {
+        int rookFrom, rookTo;
+        if (flags == Move::FLAG_CASTLE_K) { rookFrom = (us == Color::WHITE) ? 7  : 63; rookTo = (us == Color::WHITE) ? 5  : 61; }
+        else                              { rookFrom = (us == Color::WHITE) ? 0  : 56; rookTo = (us == Color::WHITE) ? 3  : 59; }
+        rem(us, PieceType::KING, from); add(us, PieceType::KING, to);
+        rem(us, PieceType::ROOK, rookFrom); add(us, PieceType::ROOK, rookTo);
+    } else if ((flags & Move::FLAG_PROMO_N) && !(flags & Move::FLAG_CAPTURE)) {
+        rem(us, PieceType::PAWN, from);
+        add(us, m.promoType(), to);
+    } else if (flags >= Move::FLAG_PROMO_N_CAP) {
+        rem(us, PieceType::PAWN, from);
+        rem(them, board.pieceOn(to), to);
+        add(us, m.promoType(), to);
+    } else if (flags == Move::FLAG_EP) {
+        int capSq = (us == Color::WHITE) ? to - 8 : to + 8;
+        rem(us, PieceType::PAWN, from);
+        rem(them, PieceType::PAWN, capSq);
+        add(us, PieceType::PAWN, to);
+    } else if (flags & Move::FLAG_CAPTURE) {
+        rem(us, movingPt, from);
+        rem(them, board.pieceOn(to), to);
+        add(us, movingPt, to);
+    } else {
+        rem(us, movingPt, from);
+        add(us, movingPt, to);
+    }
+    return d;
+}
+
+// Chamar DEPOIS de board.makeMove(m) (precisa do board no estado novo p/
+// calcular o king-bucket). d = computeMoveDelta(board, m) calculado ANTES.
+static inline void evalPush(const Board& board, const MoveDelta& d, int ply) {
+    if (!napoleon::nnue::napkIncrementalEnabled()) return;
+    if (ply < 0 || ply + 1 >= 260) { napoleon::nnue::napkSetCurrentSlot(nullptr); return; }
+    for (int net = 0; net < 2; ++net)
+        napoleon::nnue::napkLazyPush(board, gEvalSlots[ply][net], gEvalSlots[ply + 1][net],
+                                     d.adds, d.nAdds, d.rems, d.nRems);
+    napoleon::nnue::napkSetCurrentSlot(gEvalSlots[ply + 1]);
+}
+// Chamar ANTES de board.unmakeMove(m) — restaura o slot do pai como atual.
+static inline void evalPop(int ply) {
+    if (!napoleon::nnue::napkIncrementalEnabled()) return;
+    napoleon::nnue::napkSetCurrentSlot((ply >= 0 && ply < 260) ? gEvalSlots[ply] : nullptr);
+}
+
 // ─── Quiescence search ─────────────────────────────────────────────────────
-static int qsearch(Board& board, int alpha, int beta, SearchInfo& info) {
+static int qsearch(Board& board, int alpha, int beta, int ply, SearchInfo& info) {
     if (info.stopped || checkTime(info)) return 0;
     ++info.nodes;
 
@@ -277,8 +346,11 @@ static int qsearch(Board& board, int alpha, int beta, SearchInfo& info) {
         }
 
         if (!board.isLegal(m)) continue;
+        MoveDelta delta = computeMoveDelta(board, m);
         board.makeMove(m);
-        int score = -qsearch(board, -beta, -alpha, info);
+        evalPush(board, delta, ply);
+        int score = -qsearch(board, -beta, -alpha, ply + 1, info);
+        evalPop(ply);
         board.unmakeMove(m);
 
         if (info.stopped) return 0;
@@ -406,7 +478,7 @@ static int search(Board& board, int depth, int alpha, int beta,
     if (alpha >= beta) return alpha;
 
     // Quiescence at leaf
-    if (depth <= 0) return qsearch(board, alpha, beta, info);
+    if (depth <= 0) return qsearch(board, alpha, beta, ply, info);
 
     ++info.nodes;
 
@@ -437,7 +509,7 @@ static int search(Board& board, int depth, int alpha, int beta,
     // razor -> RFP -> NMP).
     if (!pvNode && !inCheck && std::abs(alpha) < MATE_SCORE - 512
         && eval < alpha - RAZOR_BASE - RAZOR_MULT * depth * depth) {
-        return qsearch(board, alpha, beta, info);
+        return qsearch(board, alpha, beta, ply, info);
     }
 
     // Reverse Futility Pruning: eval estática já muito acima de beta a
@@ -464,7 +536,9 @@ static int search(Board& board, int depth, int alpha, int beta,
             gContToAt[ply + 1]    = 0;
         }
         board.makeNullMove();
+        evalPush(board, MoveDelta{}, ply);   // passa a vez: 0 peças mudam, bucket não muda
         int score = -search(board, depth - 1 - R, -beta, -beta + 1, ply + 1, false, info, true);
+        evalPop(ply);
         board.unmakeNullMove();
         if (info.stopped) return 0;
 
@@ -507,6 +581,7 @@ static int search(Board& board, int depth, int alpha, int beta,
             Move m = caps.moves[i];
             if (!seeGE(board, m, 0)) continue;
 
+            MoveDelta delta = computeMoveDelta(board, m);
             board.makeMove(m);
             if (board.isSquareAttacked(board.kingSq(~board.stm).value(), board.stm)) {
                 board.unmakeMove(m);
@@ -516,11 +591,13 @@ static int search(Board& board, int depth, int alpha, int beta,
                 gContPieceAt[ply + 1] = int(board.pieceOn(m.to()));
                 gContToAt[ply + 1]    = m.to();
             }
+            evalPush(board, delta, ply);
 
-            int score = -qsearch(board, -probCutBeta, -probCutBeta + 1, info);
+            int score = -qsearch(board, -probCutBeta, -probCutBeta + 1, ply + 1, info);
             int probCutDepth = depth - 4;
             if (!info.stopped && score >= probCutBeta && probCutDepth > 0)
                 score = -search(board, probCutDepth, -probCutBeta, -probCutBeta + 1, ply + 1, false, info);
+            evalPop(ply);
             board.unmakeMove(m);
 
             if (info.stopped) return 0;
@@ -595,6 +672,7 @@ static int search(Board& board, int depth, int alpha, int beta,
             if (info.stopped) return 0;
         }
 
+        MoveDelta delta = computeMoveDelta(board, m);
         board.makeMove(m);
         // Verify move is legal (king of moving side not in check)
         if (board.isSquareAttacked(board.kingSq(~board.stm).value(), board.stm)) {
@@ -602,6 +680,7 @@ static int search(Board& board, int depth, int alpha, int beta,
             continue;
         }
         ++legalCnt;
+        evalPush(board, delta, ply);
 
         if (ply + 1 < 130) {
             gContPieceAt[ply + 1] = int(board.pieceOn(m.to()));
@@ -634,6 +713,7 @@ static int search(Board& board, int depth, int alpha, int beta,
             if (!info.stopped && score > alpha && score < beta)
                 score = -search(board, newDepth, -beta, -alpha, ply+1, true, info);
         }
+        evalPop(ply);
         board.unmakeMove(m);
 
         if (info.stopped) return 0;
@@ -732,6 +812,16 @@ void search(Board& board, const Limits& limits) {
     for (int i = 0; i < 130; ++i) { gContPieceAt[i] = int(PieceType::NONE); gContToAt[i] = 0; }
     memset(gHistory, 0, sizeof(gHistory));
 
+    // Acumulador incremental: refresh completo na raiz (ply 0), depois cada
+    // makeMove/unmakeMove só empurra/recua deltas (evalPush/evalPop acima).
+    if (napoleon::nnue::napkIncrementalEnabled()) {
+        napoleon::nnue::napkRefresh(board, gEvalSlots[0][0]);
+        napoleon::nnue::napkRefresh(board, gEvalSlots[0][1]);
+        napoleon::nnue::napkSetCurrentSlot(gEvalSlots[0]);
+    } else {
+        napoleon::nnue::napkSetCurrentSlot(nullptr);
+    }
+
     Move bestMove = NULL_MOVE;
     int maxDepth = limits.depth;
     if (maxDepth <= 0 || maxDepth > 64) maxDepth = 64;
@@ -823,6 +913,11 @@ void search(Board& board, const Limits& limits) {
     }
     (void)0;  // suppress unused warning
 
+    // Liberta o slot incremental: um 'eval'/'d' standalone depois deste 'go'
+    // não deve herdar um slot de uma posição/ply diferente — cai no caminho
+    // antigo (plyResolve), sempre correto independentemente do board atual.
+    napoleon::nnue::napkSetCurrentSlot(nullptr);
+
     // Output best move
     char mv[8] = "0000";
     if (!bestMove.isNull()) {
@@ -850,4 +945,52 @@ int seeValue(const Board& board, Move m) {
         else hi = mid - 1;
     }
     return lo;
+}
+
+// ─── Validação do acumulador incremental (UCI "incrtest") ─────────────────
+// Percorre TODOS os lances legais até `maxDepth` plies (estilo perft), e em
+// CADA nó compara o eval pelo slot incremental novo com o eval pelo caminho
+// antigo (plyResolve — já provado correto por "threattest"). Uma divergência
+// nesta árvore identifica exatamente o ply/FEN onde o push/pop tem um bug,
+// em vez de só "o motor jogou mal" lá na frente, sem se saber porquê.
+static void napkIncrementalWalk(Board& board, int ply, int maxDepth, int& mismatches) {
+    if (mismatches > 0) return;   // já encontrámos um bug — não vale a pena continuar
+
+    napoleon::nnue::napkSetCurrentSlot(gEvalSlots[ply]);
+    napoleon::nnue::napkSetIncremental(true);
+    int incScore = napoleon::nnue::evaluate(board);
+    napoleon::nnue::napkSetIncremental(false);
+    int refScore = napoleon::nnue::evaluate(board);
+    napoleon::nnue::napkSetIncremental(true);
+
+    if (incScore != refScore) {
+        std::printf("incrtest MISMATCH ply=%d inc=%d ref=%d fen=%s\n",
+                     ply, incScore, refScore, board.toFen().c_str());
+        ++mismatches;
+        return;
+    }
+    if (ply >= maxDepth || ply + 1 >= 259) return;
+
+    MoveList list;
+    generateMoves(board, list);
+    for (int i = 0; i < list.count && mismatches == 0; ++i) {
+        Move m = list.moves[i];
+        if (!board.isLegal(m)) continue;
+        MoveDelta delta = computeMoveDelta(board, m);
+        board.makeMove(m);
+        evalPush(board, delta, ply);
+        napkIncrementalWalk(board, ply + 1, maxDepth, mismatches);
+        evalPop(ply);
+        board.unmakeMove(m);
+    }
+}
+
+int napkIncrementalSelfTest(Board& board, int depth) {
+    int mismatches = 0;
+    napoleon::nnue::napkSetIncremental(true);
+    napoleon::nnue::napkRefresh(board, gEvalSlots[0][0]);
+    napoleon::nnue::napkRefresh(board, gEvalSlots[0][1]);
+    napkIncrementalWalk(board, 0, depth, mismatches);
+    napoleon::nnue::napkSetCurrentSlot(nullptr);
+    return mismatches;
 }

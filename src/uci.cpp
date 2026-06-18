@@ -148,6 +148,7 @@ void uci::loop() {
             std::printf("option name EvalFile type string default <embedded>\n");
             std::printf("option name WdlBrain type check default false\n");
             std::printf("option name WdlFearStrength type spin default 50 min 0 max 100\n");
+            std::printf("option name NapkIncremental type check default false\n");
             std::printf("uciok\n");
         } else if (cmd == "isready") {
             std::printf("readyok\n");
@@ -166,6 +167,8 @@ void uci::loop() {
                 napoleon::wdlbrain::setEnabled(value == "true");
             } else if (name == "WdlFearStrength") {
                 napoleon::wdlbrain::setFearStrength(std::stoi(value));
+            } else if (name == "NapkIncremental") {
+                napoleon::nnue::napkSetIncremental(value == "true");
             }
         } else if (cmd == "ucinewgame") {
             board.setFen(START_FEN);
@@ -232,6 +235,12 @@ void uci::loop() {
         } else if (cmd == "threattest") {
             int diff = napoleon::nnue::verifyFinny(board);
             std::printf("threattest: finny diff = %d\n", diff);
+        } else if (cmd == "incrtest") {
+            int depth = 4;
+            std::string tok;
+            if (ss >> tok) depth = std::stoi(tok);
+            int mismatches = napkIncrementalSelfTest(board, depth);
+            std::printf("incrtest: %d posicoes divergentes (depth=%d, 0=ok)\n", mismatches, depth);
         } else if (cmd == "seetest") {
             // Valores esperados calculados para a nossa tabela de peças
             // (P=100, N=325, B=325, R=500, Q=975) — algoritmo validado
