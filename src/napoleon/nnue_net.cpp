@@ -7,6 +7,7 @@
 #include <cstring>
 #include <algorithm>
 #include <cmath>
+#include <memory>
 
 #if defined(__AVX2__)
 #include <immintrin.h>
@@ -527,7 +528,16 @@ struct FinnyTable
     int L1 = 0;
     FinnyEntry e[2][32];
 };
-static thread_local FinnyTable tl_finnyArr[2];   // [0]=big, [1]=small
+// ⚠️ ~390KB por FinnyTable × 2 (big/small) ≈ 780KB direto na TLS — somado ao
+//   tl_plyArr abaixo (~6.3MB), já é demasiado para a TLS estática de uma
+//   thread nova (SIGSEGV logo na 1ª evaluate() ao ligar Lazy SMP). Mesmo
+//   tratamento: só um ponteiro pequeno na TLS, os dados ficam no heap.
+struct FinnyTablePair { FinnyTable t[2]; };
+static thread_local std::unique_ptr<FinnyTablePair> tl_finnyHolder;
+static inline FinnyTable& finnyFor(int idx) {
+    if (!tl_finnyHolder) tl_finnyHolder = std::make_unique<FinnyTablePair>();
+    return tl_finnyHolder->t[idx];
+}
 static thread_local int g_netIdx = 0;             // índice da rede ativa (0=big,1=small) POR THREAD
 // 🦅 Parte 3: ponteiro thread_local p/ o slot incremental atual (array napkAcc[2] do EvalState).
 //   Declarado AQUI (antes do evaluate) p/ o evaluate o ver. nullptr → fallback (finny).
@@ -538,7 +548,7 @@ static thread_local const NapkAccSlot* g_napkCurrentSlot = nullptr;
 static bool g_napkIncremental = false;
 static void napkMaterialize(const Board& board, NapkAccSlot* slot);   // fwd (def. mais abaixo)
 static void napkMaterializeThreats(const Board& board, NapkAccSlot* slot);   // 🦅 s29 fwd (threats incrementais)
-#define tl_finny (tl_finnyArr[g_netIdx])
+#define tl_finny finnyFor(g_netIdx)
 
 // Calcule l'accumulateur d'UNE perspective dans `out`, en partant du cache
 // `fe` du bucket `bkt` : applique le diff de bitboards. persp=0 → blanche
@@ -619,8 +629,17 @@ struct PlyStack
     int L1 = 0;
     PlyAcc s[260];       // MAX_PLY large (gamePly peut monter en recherche)
 };
-static thread_local PlyStack tl_plyArr[2];   // [0]=big, [1]=small (pile por rede)
-#define tl_ply (tl_plyArr[g_netIdx])
+// ⚠️ ~12.4KB por PlyAcc × 260 plies × 2 redes ≈ 6.3MB — o maior bloco TLS do
+//   ficheiro, e o que efetivamente rebentou ao ligar Lazy SMP (é o caminho
+//   plyResolve, usado sempre que NapkIncremental está OFF, o default). Mesmo
+//   tratamento: ponteiro pequeno na TLS, ~6.3MB no heap por thread.
+struct PlyStackPair { PlyStack p[2]; };
+static thread_local std::unique_ptr<PlyStackPair> tl_plyHolder;
+static inline PlyStack& plyFor(int idx) {
+    if (!tl_plyHolder) tl_plyHolder = std::make_unique<PlyStackPair>();
+    return tl_plyHolder->p[idx];
+}
+#define tl_ply plyFor(g_netIdx)
 
 // Applique le diff de bitboards (old→new) sur une perspective, en partant d'un
 // accu source `src` vers `dst`. persp 0=blanche, 1=noire.

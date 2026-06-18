@@ -45,6 +45,10 @@ bool setTunableParam(const std::string& name, int value);
 // MultiPV (análise; OFF em jogo — default 1 = comportamento inalterado).
 void setMultiPV(int n);
 
+// Lazy SMP: nº de threads de busca (default 1 = comportamento inalterado,
+// só a thread principal corre — ver "Threads" no UCI).
+void setThreads(int n);
+
 // Static Exchange Evaluation — exposta para validação (ver UCI "seetest").
 bool seeGE(const Board& board, Move m, int threshold);
 int  seeValue(const Board& board, Move m);

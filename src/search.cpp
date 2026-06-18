@@ -7,8 +7,27 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <atomic>
+#include <thread>
+#include <vector>
+#include <memory>
 
 TT gTT;
+
+// ─── Lazy SMP ────────────────────────────────────────────────────────────
+// TT partilhada SEM locks (mesma filosofia do Stockfish/Reckless/Coda: a
+// raciness ocasional é aceite — o key32 da TT já filtra a maioria do lixo,
+// e um nó com info errada é só re-verificado pela própria busca, nunca
+// confiado às cegas). O que TEM de ser por-thread (já marcado thread_local
+// acima: gHistory, gCaptureHistory, gContHist1/2, gKillers, gContPieceAt/
+// ToAt, gNmpMinPly, gOptimism, gEvalSlots, gRootMoves*, gRootExcluded*) é
+// o estado de ordenação/ply que, ao contrário da TT, não tolera mistura
+// entre threads (corromperia a própria heurística, não só "ruído").
+// gPawnCorrHist fica partilhado de propósito — é uma tabela aprendida ao
+// longo do jogo, não específica de um caminho de busca.
+static std::atomic<bool> gGlobalStop{false};
+static int gThreads = 1;
+void setThreads(int n) { gThreads = std::max(1, n); }
 
 // ─── Time helpers ──────────────────────────────────────────────────────────
 static int64_t nowMs() {
@@ -18,6 +37,10 @@ static int64_t nowMs() {
 
 static bool checkTime(SearchInfo& info) {
     if (info.stopped) return true;
+    if (gGlobalStop.load(std::memory_order_relaxed)) {
+        info.stopped = true;
+        return true;
+    }
     if (info.nodeLimit > 0 && info.nodes >= info.nodeLimit) {
         info.stopped = true;
         return true;
@@ -89,15 +112,15 @@ static void updateCorrHist(const Board& board, int rawEval, int bestScore) {
 // ─── Move ordering ──────────────────────────────────────────────────────
 static const int kPieceValue[6] = { 100, 325, 325, 500, 975, 20000 };
 static int DELTA_MARGIN = 359;  // 352 (Coda QS_DELTA_MARGIN) × 408/400
-static int gHistory[2][64][64];
-static int gCaptureHistory[2][6][6];   // [lado][atacante][vítima] — bónus/malus de capturas
+static thread_local int gHistory[2][64][64];
+static thread_local int gCaptureHistory[2][6][6];   // [lado][atacante][vítima] — bónus/malus de capturas
 
 // ─── Material/Score Optimism ────────────────────────────────────────────
 // Enviesa a eval a favor de quem está a ganhar na tendência da busca
 // (média do score entre profundidades) — incentiva a pressionar vantagem,
 // desincentiva otimismo quando a tendência é negativa. Fixo durante cada
 // profundidade da busca iterativa (atualizado entre profundidades).
-static int gOptimism[2] = {0, 0};
+static thread_local int gOptimism[2] = {0, 0};
 
 // ─── Static Exchange Evaluation (SEE) ──────────────────────────────────────
 // Todas as peças (ambas as cores) que atacam `sq`, dada uma ocupação
@@ -197,10 +220,10 @@ bool seeGE(const Board& board, Move m, int threshold) {
 // atual): "depois de X, Y costuma ser bom". gContPieceAt/gContToAt guardam,
 // por ply, qual foi o lance que levou a esse ply (NONE = nulo/raiz, nunca
 // escrito, fica sempre a zeros — sentinela sem necessidade de guarda extra).
-static int gContHist1[7][64][6][64];  // 1 ply atrás (lance do adversário)
-static int gContHist2[7][64][6][64];  // 2 plies atrás (o nosso lance anterior)
-static int gContPieceAt[130];
-static int gContToAt[130];
+static thread_local int gContHist1[7][64][6][64];  // 1 ply atrás (lance do adversário)
+static thread_local int gContHist2[7][64][6][64];  // 2 plies atrás (o nosso lance anterior)
+static thread_local int gContPieceAt[130];
+static thread_local int gContToAt[130];
 
 static int contHistScore(int ply, PieceType curPiece, int curTo) {
     int score = 0;
@@ -266,15 +289,15 @@ struct SortedMoves {
 // se o melhor lance comeu quase todos os nós, a busca já está bem decidida
 // (estilo Stockfish nodesEffort); usado no soft time check da busca
 // iterativa, junto com a best-move stability.
-static Move     gRootMoves[256];
-static uint64_t gRootMoveNodes[256];
-static int      gRootMoveCount = 0;
+static thread_local Move     gRootMoves[256];
+static thread_local uint64_t gRootMoveNodes[256];
+static thread_local int      gRootMoveCount = 0;
 
 // MultiPV: lances de raiz já reportados nesta profundidade (excluídos da
 // próxima passada). gRootExcludedCount fica a 0 quando MultiPV=1 (default)
 // — comportamento idêntico ao de antes desta técnica existir.
-static Move gRootExcluded[8];
-static int  gRootExcludedCount = 0;
+static thread_local Move gRootExcluded[8];
+static thread_local int  gRootExcludedCount = 0;
 static int  gMultiPV = 1;
 void setMultiPV(int n) { gMultiPV = std::max(1, std::min(8, n)); }
 
@@ -284,7 +307,18 @@ void setMultiPV(int n) { gMultiPV = std::max(1, std::min(8, n)); }
 // e o evaluate cai sempre no caminho antigo (plyResolve/finny). O refresh
 // completo só acontece quando o rei muda de king-bucket (napkLazyPush trata
 // disso); de resto é só copiar o pai + aplicar os deltas do lance.
-static napoleon::nnue::NapkAccSlot gEvalSlots[260][2];   // [ply][0=big,1=small]
+// ⚠️ ~22KB por NapkAccSlot × 260 plies × 2 redes ≈ 11.4MB — DEMASIADO para
+//   viver direto na TLS (estourava a reserva estática de TLS do processo em
+//   threads novas: SIGSEGV logo na 1ª chamada a evaluate() na thread helper,
+//   apanhado ao ligar Lazy SMP). Guarda-se só um ponteiro pequeno na TLS;
+//   os 11.4MB ficam no heap, alocados uma vez por thread ao 1º uso.
+struct EvalSlotsArray { napoleon::nnue::NapkAccSlot s[260][2]; };
+static thread_local std::unique_ptr<EvalSlotsArray> gEvalSlotsHolder;
+static inline napoleon::nnue::NapkAccSlot (&evalSlots())[260][2] {
+    if (!gEvalSlotsHolder) gEvalSlotsHolder = std::make_unique<EvalSlotsArray>();
+    return gEvalSlotsHolder->s;
+}
+#define gEvalSlots evalSlots()
 
 struct MoveDelta {
     napoleon::nnue::NapkDelta adds[2]; int nAdds = 0;
@@ -394,7 +428,7 @@ static inline int mateBeta(int beta, int ply) {
 }
 
 // ─── killers per ply ───────────────────────────────────────────────────────
-static int gKillers[128][2];
+static thread_local int gKillers[128][2];
 
 // ─── Aspiration Windows ──────────────────────────────────────────────────
 static int ASPIRATION_MIN_DEPTH = 4;
@@ -485,7 +519,7 @@ static bool hasNonPawnMaterial(const Board& board, Color c) {
 
 // Bloqueia novo NMP recursivo até este ply — busca de verificação contra
 // zugzwang (mesmo mecanismo do Stockfish/Reckless: nmpMinPly).
-static int gNmpMinPly = 0;
+static thread_local int gNmpMinPly = 0;
 
 // ─── PVS / Alpha-Beta ─────────────────────────────────────────────────────
 static int search(Board& board, int depth, int alpha, int beta,
@@ -919,7 +953,13 @@ bool setTunableParam(const std::string& name, int value) {
 }
 
 // ─── Iterative deepening ──────────────────────────────────────────────────
-void search(Board& board, const Limits& limits, uint64_t* nodesOut) {
+// Corpo da busca iterativa — corre em QUALQUER thread (principal ou
+// helper de Lazy SMP). isMain controla só a impressão UCI (info/bestmove);
+// helpers correm exatamente a mesma busca, partilham a TT, e o resultado
+// delas é descartado — só ajudam a preencher a TT mais rápido (mesma
+// filosofia dos 3 motores de referência, sem stagger de depth: a
+// concorrência natural pela TT já basta para diversidade).
+static void searchBody(Board& board, const Limits& limits, bool isMain, uint64_t* nodesOut) {
     SearchInfo info;
     info.startMs = nowMs();
     info.nodeLimit = limits.nodes;
@@ -940,7 +980,6 @@ void search(Board& board, const Limits& limits, uint64_t* nodesOut) {
         info.softLimitMs = 5000;
     }
 
-    gTT.newSearch();
     memset(gKillers, 0, sizeof(gKillers));
     gNmpMinPly = 0;
     gOptimism[0] = gOptimism[1] = 0;
@@ -1047,10 +1086,12 @@ void search(Board& board, const Limits& limits, uint64_t* nodesOut) {
             }
         }
 
-        printf("info depth %d multipv 1 score %s nodes %llu nps %llu time %lld pv %s\n",
-               depth, scoreStr, (unsigned long long)info.nodes,
-               (unsigned long long)nps, (long long)elapsed, pv);
-        fflush(stdout);
+        if (isMain) {
+            printf("info depth %d multipv 1 score %s nodes %llu nps %llu time %lld pv %s\n",
+                   depth, scoreStr, (unsigned long long)info.nodes,
+                   (unsigned long long)nps, (long long)elapsed, pv);
+            fflush(stdout);
+        }
 
         // MultiPV (análise; gMultiPV=1 default → este bloco nunca corre,
         // comportamento idêntico a antes desta técnica existir). Cada linha
@@ -1065,7 +1106,7 @@ void search(Board& board, const Limits& limits, uint64_t* nodesOut) {
         // estrita. Inofensivo em jogo (MultiPV=1 nunca entra aqui), só afeta
         // a leitura da análise. Corrigir a sério exigiria isolar o estado de
         // ordenação por linha — fora do âmbito desta funcionalidade utilitária.
-        if (gMultiPV > 1 && !bestMove.isNull() && !info.stopped) {
+        if (isMain && gMultiPV > 1 && !bestMove.isNull() && !info.stopped) {
             gRootExcluded[0] = bestMove;
             gRootExcludedCount = 1;
             for (int pvIdx = 1; pvIdx < gMultiPV; ++pvIdx) {
@@ -1147,10 +1188,34 @@ void search(Board& board, const Limits& limits, uint64_t* nodesOut) {
             mv[4] = '\0';
         }
     }
-    printf("bestmove %s\n", mv);
-    fflush(stdout);
+    if (isMain) {
+        printf("bestmove %s\n", mv);
+        fflush(stdout);
+    }
 
     if (nodesOut) *nodesOut = info.nodes;
+}
+
+// ─── Wrapper público: dispara os helpers de Lazy SMP (gThreads-1) e corre
+//    a busca principal nesta própria thread. gTT.newSearch() e o reset do
+//    stop global acontecem AQUI, UMA só vez (não por-thread). Os helpers
+//    recebem cada um a SUA cópia do board (Board é trivialmente copiável,
+//    sem ponteiros) — só a thread principal toca no board do chamador.
+void search(Board& board, const Limits& limits, uint64_t* nodesOut) {
+    gTT.newSearch();
+    gGlobalStop.store(false, std::memory_order_relaxed);
+
+    int nHelpers = std::max(0, gThreads - 1);
+    std::vector<Board> helperBoards(nHelpers, board);
+    std::vector<std::thread> helpers;
+    helpers.reserve(nHelpers);
+    for (int i = 0; i < nHelpers; ++i)
+        helpers.emplace_back(searchBody, std::ref(helperBoards[i]), std::cref(limits), false, nullptr);
+
+    searchBody(board, limits, true, nodesOut);
+
+    gGlobalStop.store(true, std::memory_order_relaxed);
+    for (auto& t : helpers) t.join();
 }
 
 int seeValue(const Board& board, Move m) {

@@ -145,7 +145,7 @@ void uci::loop() {
             std::printf("id name littleindian\n");
             std::printf("id author littleindian\n");
             std::printf("option name Hash type spin default 16 min 1 max 16384\n");
-            std::printf("option name Threads type spin default 1 min 1 max 1\n");
+            std::printf("option name Threads type spin default 1 min 1 max 256\n");
             std::printf("option name EvalFile type string default <embedded>\n");
             std::printf("option name WdlBrain type check default false\n");
             std::printf("option name WdlFearStrength type spin default 50 min 0 max 100\n");
@@ -161,6 +161,8 @@ void uci::loop() {
             if (name == "Hash") {
                 int mb = std::stoi(value);
                 gTT.resize(mb);
+            } else if (name == "Threads") {
+                setThreads(std::stoi(value));
             } else if (name == "EvalFile") {
                 if (value != "<embedded>" && !value.empty()) {
                     if (!napoleon::nnue::load(value))
