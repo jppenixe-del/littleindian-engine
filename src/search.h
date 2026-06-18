@@ -3,6 +3,7 @@
 #include "tt.h"
 #include <cstdint>
 #include <atomic>
+#include <string>
 
 // Search limits
 struct Limits {
@@ -32,6 +33,14 @@ static constexpr int MATE_IN(int n) { return MATE_SCORE - n; }
 static inline bool   isMate(int s)  { return std::abs(s) >= MATE_SCORE - 512; }
 
 void search(Board& board, const Limits& limits);
+
+// Parâmetros de busca afináveis por SPSA (training/spsa_tune.py), expostos
+// como opções UCI "type spin". printTunableOptions() imprime as linhas
+// "option name ..." (chamar de dentro do handler "uci"); setTunableParam
+// tenta aplicar um "setoption" — devolve false se o nome não é um tunable
+// (uci.cpp tenta isto como fallback depois das opções específicas).
+void printTunableOptions();
+bool setTunableParam(const std::string& name, int value);
 
 // Static Exchange Evaluation — exposta para validação (ver UCI "seetest").
 bool seeGE(const Board& board, Move m, int threshold);

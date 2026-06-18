@@ -88,7 +88,7 @@ static void updateCorrHist(const Board& board, int rawEval, int bestScore) {
 
 // ─── Move ordering ──────────────────────────────────────────────────────
 static const int kPieceValue[6] = { 100, 325, 325, 500, 975, 20000 };
-static constexpr int DELTA_MARGIN = 359;  // 352 (Coda QS_DELTA_MARGIN) × 408/400
+static int DELTA_MARGIN = 359;  // 352 (Coda QS_DELTA_MARGIN) × 408/400
 static int gHistory[2][64][64];
 static int gCaptureHistory[2][6][6];   // [lado][atacante][vítima] — bónus/malus de capturas
 
@@ -380,41 +380,44 @@ static inline int mateBeta(int beta, int ply) {
 static int gKillers[128][2];
 
 // ─── Aspiration Windows ──────────────────────────────────────────────────
-static constexpr int ASPIRATION_MIN_DEPTH = 4;
-static constexpr int ASPIRATION_DELTA     = 16;
+static int ASPIRATION_MIN_DEPTH = 4;
+static int ASPIRATION_DELTA     = 16;
 
 // ─── Razoring ────────────────────────────────────────────────────────────
-static constexpr int RAZOR_BASE = 300;
-static constexpr int RAZOR_MULT = 300;
+static int RAZOR_BASE = 300;
+static int RAZOR_MULT = 300;
 
 // ─── Reverse Futility Pruning ──────────────────────────────────────────────
 // Magnitude informada pelo Coda (RFP_MARGIN_NOIMP=43, escalado por
 // OUTPUT_SCALE_CP/400 = 408/400; sem flag "improving" ainda, por isso só
 // um valor). Por afinar com SPSA depois de validado.
-static constexpr int RFP_MAX_DEPTH = 7;
-static constexpr int RFP_MARGIN    = 44;  // 43 × 408/400
+static int RFP_MAX_DEPTH = 7;
+static int RFP_MARGIN    = 44;  // 43 × 408/400
 
 // ─── Null Move Pruning ──────────────────────────────────────────────────────
 // NMP_BASE_R/NMP_DIV informados pelo Coda (7.8 / 7.5 → arredondado);
 // não são valores em cp, não se escalam por OUTPUT_SCALE_CP.
-static constexpr int NMP_MIN_DEPTH = 3;
-static constexpr int NMP_BASE_R    = 8;
-static constexpr int NMP_DIV       = 7;
+static int NMP_MIN_DEPTH = 3;
+static int NMP_BASE_R    = 8;
+static int NMP_DIV       = 7;
 
 // ─── Late Move Reductions ───────────────────────────────────────────────
 // Tabela log(depth)*log(moveCount)/C, C=1.3 neutro (ponto de partida comum
 // a Stockfish/Reckless/Coda antes de SPSA). Limitada a depth-2 para nunca
 // reduzir abaixo de profundidade 1.
-static constexpr int LMR_MIN_DEPTH = 3;
-static constexpr int LMR_MIN_MOVES = 3;
-static constexpr double LMR_C      = 1.3;
+static int LMR_MIN_DEPTH = 3;
+static int LMR_MIN_MOVES = 3;
+// LMR_C como int×100 (SPSA/UCI só faz spin de inteiros) — afinável via
+// rebuildLmrTable() sempre que mudar (a tabela é precomputada).
+static int LMR_C_X100 = 130;
 static int gLmrTable[64][64];
 
-static bool initLmrTable() {
+static bool rebuildLmrTable() {
+    double c = LMR_C_X100 / 100.0;
     for (int d = 1; d < 64; ++d)
         for (int n = 1; n < 64; ++n) {
             if (d >= LMR_MIN_DEPTH && n >= LMR_MIN_MOVES) {
-                int r = int(std::log(d) * std::log(n) / LMR_C);
+                int r = int(std::log(d) * std::log(n) / c);
                 gLmrTable[d][n] = std::min(r, d - 2);
             } else {
                 gLmrTable[d][n] = 0;
@@ -422,39 +425,39 @@ static bool initLmrTable() {
         }
     return true;
 }
-static const bool gLmrInit = initLmrTable();
+static const bool gLmrInit = rebuildLmrTable();
 
 // ─── Internal Iterative Reduction ───────────────────────────────────────
-static constexpr int IIR_MIN_DEPTH = 4;
+static int IIR_MIN_DEPTH = 4;
 
 // ─── ProbCut ─────────────────────────────────────────────────────────────
-static constexpr int PROBCUT_MIN_DEPTH = 5;
-static constexpr int PROBCUT_MARGIN    = 220;  // ~ordem de SEE_PRUNE_MARGIN
+static int PROBCUT_MIN_DEPTH = 5;
+static int PROBCUT_MARGIN    = 220;  // ~ordem de SEE_PRUNE_MARGIN
 
 // ─── Singular Extensions ────────────────────────────────────────────────
-static constexpr int SE_MIN_DEPTH = 6;
-static constexpr int SE_MARGIN    = 64;
+static int SE_MIN_DEPTH = 6;
+static int SE_MARGIN    = 64;
 
 // ─── Late Move Pruning ───────────────────────────────────────────────────
 // Magnitudes informadas pelo Coda (engine de referência mais próximo,
 // também 100% vibe-coded), constantes de profundidade/contagem sem escala
 // (não são cp); margens em cp escaladas por OUTPUT_SCALE_CP/400 = 408/400.
-static constexpr int LMP_MAX_DEPTH = 8;
-static constexpr int LMP_BASE      = 6;
-static constexpr int LMP_MULT      = 1;
+static int LMP_MAX_DEPTH = 8;
+static int LMP_BASE      = 6;
+static int LMP_MULT      = 1;
 
 // ─── Futility Pruning ───────────────────────────────────────────────────
-static constexpr int FUTILITY_MAX_DEPTH = 8;
-static constexpr int FUTILITY_BASE      = 82;   // 80 × 408/400
-static constexpr int FUTILITY_MARGIN    = 112;  // 110 × 408/400
+static int FUTILITY_MAX_DEPTH = 8;
+static int FUTILITY_BASE      = 82;   // 80 × 408/400
+static int FUTILITY_MARGIN    = 112;  // 110 × 408/400
 
 // ─── SEE Pruning ────────────────────────────────────────────────────────
-static constexpr int SEE_PRUNE_MAX_DEPTH = 7;
-static constexpr int SEE_PRUNE_MARGIN    = 219; // 215 × 408/400
+static int SEE_PRUNE_MAX_DEPTH = 7;
+static int SEE_PRUNE_MARGIN    = 219; // 215 × 408/400
 
 // ─── History Pruning ────────────────────────────────────────────────────
-static constexpr int HIST_PRUNE_MAX_DEPTH = 8;
-static constexpr int HIST_PRUNE_MARGIN    = 1500;
+static int HIST_PRUNE_MAX_DEPTH = 8;
+static int HIST_PRUNE_MARGIN    = 1500;
 
 static bool hasNonPawnMaterial(const Board& board, Color c) {
     return board.pieces(c, PieceType::KNIGHT).any() ||
@@ -815,6 +818,72 @@ static int search(Board& board, int depth, int alpha, int beta,
     return bestScore;
 }
 
+// Best-move stability: BASE/STEP como int×100/×1000 (UCI spin só dá inteiros;
+// fórmula real em stabilityFactor, na busca iterativa abaixo).
+static int BM_STABILITY_MAX      = 8;
+static int BM_STABILITY_BASE_X100  = 120;   // 1.20
+static int BM_STABILITY_STEP_X1000 = 75;    // 0.075
+
+// ─── Parâmetros afináveis por SPSA (training/spsa_tune.py) ─────────────────
+// Cada técnica entrou por SPRT com este valor neutro; SPSA só reafina a
+// MAGNITUDE à escala da NapK9, nunca decide se a técnica fica (isso é SPRT,
+// sempre — disciplina do projeto). Exposição via UCI "option type spin":
+// uci.cpp chama printTunableOptions()/setTunableParam() abaixo.
+struct TunableParam { const char* name; int* value; int lo; int hi; };
+static const TunableParam gTunables[] = {
+    { "AspirationDelta",   &ASPIRATION_DELTA,    4,    64   },
+    { "RazorBase",         &RAZOR_BASE,          50,   600  },
+    { "RazorMult",         &RAZOR_MULT,          50,   600  },
+    { "RfpMaxDepth",       &RFP_MAX_DEPTH,       2,    12   },
+    { "RfpMargin",         &RFP_MARGIN,          10,   120  },
+    { "NmpMinDepth",       &NMP_MIN_DEPTH,       1,    6    },
+    { "NmpBaseR",          &NMP_BASE_R,          2,    16   },
+    { "NmpDiv",            &NMP_DIV,             2,    16   },
+    { "LmrMinDepth",       &LMR_MIN_DEPTH,       1,    6    },
+    { "LmrMinMoves",       &LMR_MIN_MOVES,       1,    8    },
+    { "LmrCx100",          &LMR_C_X100,          60,   260  },
+    { "IirMinDepth",       &IIR_MIN_DEPTH,       2,    10   },
+    { "ProbcutMinDepth",   &PROBCUT_MIN_DEPTH,   3,    12   },
+    { "ProbcutMargin",     &PROBCUT_MARGIN,      50,   500  },
+    { "SeMinDepth",        &SE_MIN_DEPTH,        3,    14   },
+    { "SeMargin",          &SE_MARGIN,           10,   250  },
+    { "LmpMaxDepth",       &LMP_MAX_DEPTH,       2,    16   },
+    { "LmpBase",           &LMP_BASE,            1,    20   },
+    { "LmpMult",           &LMP_MULT,            1,    8    },
+    { "FutilityMaxDepth",  &FUTILITY_MAX_DEPTH,  2,    16   },
+    { "FutilityBase",      &FUTILITY_BASE,       10,   300  },
+    { "FutilityMargin",    &FUTILITY_MARGIN,     10,   300  },
+    { "SeePruneMaxDepth",  &SEE_PRUNE_MAX_DEPTH, 2,    14   },
+    { "SeePruneMargin",    &SEE_PRUNE_MARGIN,    50,   500  },
+    { "HistPruneMaxDepth", &HIST_PRUNE_MAX_DEPTH,2,    16   },
+    { "HistPruneMargin",   &HIST_PRUNE_MARGIN,   200,  4000 },
+    { "DeltaMargin",       &DELTA_MARGIN,        100,  800  },
+    { "BmStabilityMax",    &BM_STABILITY_MAX,    1,    16   },
+    { "BmStabilityBaseX100", &BM_STABILITY_BASE_X100,  100, 250 },
+    { "BmStabilityStepX1000", &BM_STABILITY_STEP_X1000, 0,   200 },
+};
+static constexpr int N_TUNABLES = sizeof(gTunables) / sizeof(gTunables[0]);
+
+void printTunableOptions() {
+    for (int i = 0; i < N_TUNABLES; ++i) {
+        const TunableParam& p = gTunables[i];
+        printf("option name %s type spin default %d min %d max %d\n",
+               p.name, *p.value, p.lo, p.hi);
+    }
+}
+
+bool setTunableParam(const std::string& name, int value) {
+    for (int i = 0; i < N_TUNABLES; ++i) {
+        if (name == gTunables[i].name) {
+            *gTunables[i].value = std::max(gTunables[i].lo, std::min(gTunables[i].hi, value));
+            if (name == "LmrCx100" || name == "LmrMinDepth" || name == "LmrMinMoves")
+                rebuildLmrTable();
+            return true;
+        }
+    }
+    return false;
+}
+
 // ─── Iterative deepening ──────────────────────────────────────────────────
 void search(Board& board, const Limits& limits) {
     SearchInfo info;
@@ -865,11 +934,9 @@ void search(Board& board, const Limits& limits) {
     int prevScore = 0;
     bool havePrevScore = false;
     // Best-move stability: nº de iterações consecutivas em que o melhor
-    // lance não mudou. Usa-se para encolher o tempo alocado quando a
-    // decisão já está estável há várias profundidades (ver soft time
-    // check abaixo) — ideia comum a Stockfish/Reckless, parâmetros aqui
-    // neutros (BM_STABILITY_MAX/etapa), por afinar com SPSA depois.
-    static constexpr int BM_STABILITY_MAX = 8;
+    // lance não mudou — encolhe o tempo alocado quando a decisão já está
+    // estável (ver soft time check abaixo). BM_STABILITY_* movidos p/
+    // scope de ficheiro (perto de gTunables, abaixo) para SPSA os afinar.
     int bestMoveStability = 0;
 
     for (int depth = 1; depth <= maxDepth; ++depth) {
@@ -955,9 +1022,8 @@ void search(Board& board, const Limits& limits) {
         // ganham mais tempo) E pela best-move stability (sempre ativo:
         // lance estável há várias profundidades → encolhe o tempo;
         // acabou de mudar → alarga um pouco, ainda incerto).
-        static constexpr double BM_STABILITY_BASE = 1.2;
-        static constexpr double BM_STABILITY_STEP = 0.075;
-        double stabilityFactor = BM_STABILITY_BASE - BM_STABILITY_STEP * bestMoveStability;
+        double stabilityFactor = BM_STABILITY_BASE_X100 / 100.0
+                                - (BM_STABILITY_STEP_X1000 / 1000.0) * bestMoveStability;
         int64_t effectiveSoft = (int64_t)(info.softLimitMs * stabilityFactor);
         if (napoleon::wdlbrain::g_config.enabled)
             effectiveSoft = (int64_t)(effectiveSoft * napoleon::wdlbrain::timeFactor(board, score));

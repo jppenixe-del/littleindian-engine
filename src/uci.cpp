@@ -5,6 +5,7 @@
 #include "napoleon/wdl_brain.h"
 #include "tt.h"
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <string>
 #include <sstream>
@@ -149,6 +150,7 @@ void uci::loop() {
             std::printf("option name WdlBrain type check default false\n");
             std::printf("option name WdlFearStrength type spin default 50 min 0 max 100\n");
             std::printf("option name NapkIncremental type check default false\n");
+            printTunableOptions();
             std::printf("uciok\n");
         } else if (cmd == "isready") {
             std::printf("readyok\n");
@@ -169,6 +171,8 @@ void uci::loop() {
                 napoleon::wdlbrain::setFearStrength(std::stoi(value));
             } else if (name == "NapkIncremental") {
                 napoleon::nnue::napkSetIncremental(value == "true");
+            } else if (!setTunableParam(name, std::atoi(value.c_str()))) {
+                std::printf("info string unknown option %s\n", name.c_str());
             }
         } else if (cmd == "ucinewgame") {
             board.setFen(START_FEN);
