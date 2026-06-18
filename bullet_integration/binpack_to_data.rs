@@ -35,12 +35,16 @@
 // ⚠️ Filtro SF (igual ao binpack_to_plain): ply>=16, sem xeque, |score|<=10000, mv Normal, destino vazio.
 //
 // 🦅 SHUFFLE EMBUTIDO (s29 cont. 22, processo "Coda"): o Coda lê o binpack a direito e baralha
-//   num buffer interno do SfBinpackLoader (binpack_buffer_mb=1024) — não tem passo separado.
-//   Nós não podemos trocar de loader (NapkInputV10 exige NapkRecordV2, não TrainingDataEntry),
-//   mas podemos ter o MESMO efeito sem 2º passo: streaming shuffle buffer (reservoir clássico,
-//   igual ao shuffle_buffer do TF/Coda) dentro deste conversor. Resultado: 1 só comando,
-//   binpack → .data2 JÁ baralhado, sem precisar do shuffle_data2.py depois.
-//   --shuffle-mb N (default 1024, default OFF se N=0) ; --seed N (default 7).
+//   num buffer interno do SfBinpackLoader (buffer_size_mb=256, 4 threads — confirmado lendo
+//   github.com/adamtwiss/coda/training/configs/v7_1024h16x32s.rs, a config dele mais próxima
+//   da nossa rede L1=1024; conceptual só, sem copiar código — Coda não tem licença declarada).
+//   Nós não podemos trocar de loader (NapkInputV10 exige NapkRecordV2, não TrainingDataEntry)
+//   NESTE conversor offline, mas podemos ter o MESMO efeito sem 2º passo: streaming shuffle
+//   buffer (reservoir clássico) dentro deste binário. Resultado: 1 só comando, binpack →
+//   .data2 JÁ baralhado, sem precisar do shuffle_data2.py depois.
+//   (Para treino 100% on-the-fly, sem .data2 nenhum, ver napk9_v10_binpack_loader.rs +
+//   napk9_train_v10_binpack.rs — esse é o caminho mais próximo do processo real do Coda.)
+//   --shuffle-mb N (default 256, igual ao Coda; 0 desliga) ; --seed N (default 7).
 
 use std::env;
 use std::fs::File;
@@ -418,7 +422,7 @@ fn main() {
     //   default 1024, igual ao SYK_BINPACK_BUFFER_MB de referência. rec_len segue --v2 (112B) ou
     //   o clássico (268B).
     let shuffle_mb: usize = args.iter().position(|a| a == "--shuffle-mb")
-        .and_then(|i| args.get(i + 1)).and_then(|v| v.parse().ok()).unwrap_or(1024);
+        .and_then(|i| args.get(i + 1)).and_then(|v| v.parse().ok()).unwrap_or(256);
     let shuffle_seed: u64 = args.iter().position(|a| a == "--seed")
         .and_then(|i| args.get(i + 1)).and_then(|v| v.parse().ok()).unwrap_or(7);
     let rec_len = if formato_v2 { 112 } else { 268 };
