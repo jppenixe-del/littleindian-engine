@@ -1,0 +1,28 @@
+# Build artifacts
+littleindian
+littleindian.base
+littleindian.new
+littleindian.candidate
+littleindian.stable
+littleindian.estavel
+littleindian.novo
+*.o
+
+# Python
+__pycache__/
+*.pyc
+
+# SPRT/test output
+training/*.pgn
+training/book.bin
+
+# Editor/OS
+.DS_Store
+*.pgn
+training/*.log
+training/sprt_*/
+littleindian.candidate_*
+littleindian.bloco*
+littleindian.stable
+littleindian.new
+nohup.out

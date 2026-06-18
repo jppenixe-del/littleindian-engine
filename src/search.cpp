@@ -1,0 +1,823 @@
+#include "search.h"
+#include "movegen.h"
+#include "napoleon/nnue_net.h"
+#include "napoleon/wdl_brain.h"
+#include <cstdio>
+#include <cstring>
+#include <algorithm>
+#include <chrono>
+#include <cmath>
+
+TT gTT;
+
+// ─── Time helpers ──────────────────────────────────────────────────────────
+static int64_t nowMs() {
+    using namespace std::chrono;
+    return duration_cast<milliseconds>(steady_clock::now().time_since_epoch()).count();
+}
+
+static bool checkTime(SearchInfo& info) {
+    if (info.stopped) return true;
+    if ((info.nodes & 2047) == 0) {
+        if (info.timeLimitMs > 0 && nowMs() >= info.startMs + info.timeLimitMs) {
+            info.stopped = true;
+            return true;
+        }
+    }
+    return false;
+}
+
+// ─── Eval ─────────────────────────────────────────────────────────────────
+static int staticEval(const Board& board) {
+    int score;
+    if (napoleon::nnue::isLoaded()) {
+        score = napoleon::nnue::evaluate(board);
+    } else {
+        // Material fallback (used when no NNUE net loaded)
+        static const int pv[] = { 100, 325, 325, 500, 975, 20000, 0 };
+        int s = 0;
+        for (int pt = 0; pt < 5; ++pt) {
+            s += board.pieceBB[0][pt].popcount() * pv[pt];
+            s -= board.pieceBB[1][pt].popcount() * pv[pt];
+        }
+        score = board.sideToMove() == Color::WHITE ? s : -s;
+    }
+    // Escala pelo halfmove clock: aproxima a regra dos 50 lances — a eval
+    // perde força à medida que o contador sobe (posição a tender a empate).
+    score -= score * board.halfmoveClock() / 199;
+    return score;
+}
+
+// ─── Correction History (peões) ────────────────────────────────────────
+// Corrige a eval estática com o erro médio observado entre eval e o
+// resultado real da busca, indexado pela estrutura de peões — a eval erra
+// de forma sistemática em certas estruturas (peões passados, bloqueados,
+// etc.) e isto aprende esse desvio ao longo da partida/teste.
+static constexpr int CORR_HIST_SIZE = 16384;
+static constexpr int CORR_HIST_GRAIN = 256;  // escala interna da tabela
+static constexpr int CORR_HIST_MAX   = 1024; // limite do termo de correção, em cp
+static int gPawnCorrHist[2][CORR_HIST_SIZE];
+
+static uint64_t pawnKey(const Board& board) {
+    uint64_t key = 0;
+    Bitboard wp = board.pieces(Color::WHITE, PieceType::PAWN);
+    Bitboard bp = board.pieces(Color::BLACK, PieceType::PAWN);
+    while (wp.any()) key ^= zobrist::piece(Color::WHITE, PieceType::PAWN, wp.poplsb().value());
+    while (bp.any()) key ^= zobrist::piece(Color::BLACK, PieceType::PAWN, bp.poplsb().value());
+    return key;
+}
+
+static int pawnCorrTerm(const Board& board) {
+    int idx = (int)(pawnKey(board) % CORR_HIST_SIZE);
+    return gPawnCorrHist[int(board.sideToMove())][idx] / CORR_HIST_GRAIN;
+}
+
+static void updateCorrHist(const Board& board, int rawEval, int bestScore) {
+    int idx = (int)(pawnKey(board) % CORR_HIST_SIZE);
+    int& e = gPawnCorrHist[int(board.sideToMove())][idx];
+    int diff = (bestScore - rawEval) * CORR_HIST_GRAIN;
+    e += (diff - e) / 32;  // média móvel exponencial
+    int limit = CORR_HIST_MAX * CORR_HIST_GRAIN;
+    if (e > limit) e = limit;
+    if (e < -limit) e = -limit;
+}
+
+// ─── Move ordering ──────────────────────────────────────────────────────
+static const int kPieceValue[6] = { 100, 325, 325, 500, 975, 20000 };
+static constexpr int DELTA_MARGIN = 359;  // 352 (Coda QS_DELTA_MARGIN) × 408/400
+static int gHistory[2][64][64];
+
+// ─── Material/Score Optimism ────────────────────────────────────────────
+// Enviesa a eval a favor de quem está a ganhar na tendência da busca
+// (média do score entre profundidades) — incentiva a pressionar vantagem,
+// desincentiva otimismo quando a tendência é negativa. Fixo durante cada
+// profundidade da busca iterativa (atualizado entre profundidades).
+static int gOptimism[2] = {0, 0};
+
+// ─── Static Exchange Evaluation (SEE) ──────────────────────────────────────
+// Todas as peças (ambas as cores) que atacam `sq`, dada uma ocupação
+// arbitrária `occ` (usado para simular peças removidas durante a troca).
+static Bitboard attackersTo(const Board& board, int sq, Bitboard occ) {
+    Bitboard attackers;
+    attackers |= attacks::pawnAttackSq(Color::BLACK, Square(sq)) & board.pieces(Color::WHITE, PieceType::PAWN);
+    attackers |= attacks::pawnAttackSq(Color::WHITE, Square(sq)) & board.pieces(Color::BLACK, PieceType::PAWN);
+    attackers |= attacks::knightAttacks(Square(sq)) &
+                 (board.pieces(Color::WHITE, PieceType::KNIGHT) | board.pieces(Color::BLACK, PieceType::KNIGHT));
+    attackers |= attacks::kingAttacks(Square(sq)) &
+                 (board.pieces(Color::WHITE, PieceType::KING) | board.pieces(Color::BLACK, PieceType::KING));
+    Bitboard bishops = board.pieces(Color::WHITE, PieceType::BISHOP) | board.pieces(Color::BLACK, PieceType::BISHOP)
+                      | board.pieces(Color::WHITE, PieceType::QUEEN)  | board.pieces(Color::BLACK, PieceType::QUEEN);
+    attackers |= attacks::bishopAttacks(Square(sq), occ) & bishops;
+    Bitboard rooks   = board.pieces(Color::WHITE, PieceType::ROOK)   | board.pieces(Color::BLACK, PieceType::ROOK)
+                      | board.pieces(Color::WHITE, PieceType::QUEEN)  | board.pieces(Color::BLACK, PieceType::QUEEN);
+    attackers |= attacks::rookAttacks(Square(sq), occ) & rooks;
+    return attackers & occ;
+}
+
+// Devolve true se o valor da troca (jogada bem capturada até ao fim, ambos
+// os lados a jogar de forma otima) for >= threshold. Algoritmo clássico de
+// swap-list (Stockfish/Reckless/Coda); atenção à contabilidade da promoção
+// dentro do ciclo — usa-se o valor simples da peça (não o ganho da
+// promoção), que é a forma correta (ver nota no Coda: a forma alternativa
+// inverte o veredito em recapturas de promoção).
+bool seeGE(const Board& board, Move m, int threshold) {
+    if (m.isCastle()) return 0 >= threshold;
+
+    int from = m.from(), to = m.to();
+    PieceType targetPt   = board.pieceOn(to);
+    PieceType attackerPt = board.pieceOn(from);
+    bool isPromo = m.isPromo();
+
+    int balance = m.isEP() ? kPieceValue[int(PieceType::PAWN)]
+                : (targetPt != PieceType::NONE) ? kPieceValue[int(targetPt)]
+                : 0;
+
+    if (isPromo)
+        balance += kPieceValue[int(m.promoType())] - kPieceValue[int(PieceType::PAWN)];
+
+    balance -= threshold;
+    if (balance < 0) return false;
+
+    int riskValue = isPromo ? kPieceValue[int(m.promoType())] : kPieceValue[int(attackerPt)];
+    balance -= riskValue;
+    if (balance >= 0) return true;
+
+    Bitboard occ = board.allOcc ^ Bitboard::fromSquare(from);
+    if (m.isEP()) {
+        int epVictimSq = (to & 7) | (from & ~7);
+        occ ^= Bitboard::fromSquare(epVictimSq);
+    }
+
+    Bitboard bishops = board.pieces(Color::WHITE, PieceType::BISHOP) | board.pieces(Color::BLACK, PieceType::BISHOP)
+                      | board.pieces(Color::WHITE, PieceType::QUEEN)  | board.pieces(Color::BLACK, PieceType::QUEEN);
+    Bitboard rooks   = board.pieces(Color::WHITE, PieceType::ROOK)   | board.pieces(Color::BLACK, PieceType::ROOK)
+                      | board.pieces(Color::WHITE, PieceType::QUEEN)  | board.pieces(Color::BLACK, PieceType::QUEEN);
+
+    Color stm = ~board.sideToMove();
+    Bitboard attackers = attackersTo(board, to, occ);
+
+    while (true) {
+        Bitboard stmAttackers = attackers & board.occupied[int(stm)];
+        if (stmAttackers.empty()) break;
+
+        PieceType lvaPt = PieceType::NONE;
+        int lvaSq = -1;
+        for (int pt = 0; pt < 6; ++pt) {
+            Bitboard bb = board.pieces(stm, PieceType(pt)) & stmAttackers;
+            if (bb.any()) { lvaPt = PieceType(pt); lvaSq = bb.lsb().value(); break; }
+        }
+
+        occ ^= Bitboard::fromSquare(lvaSq);
+        if (lvaPt == PieceType::PAWN || lvaPt == PieceType::BISHOP || lvaPt == PieceType::QUEEN)
+            attackers |= attacks::bishopAttacks(Square(to), occ) & bishops;
+        if (lvaPt == PieceType::ROOK || lvaPt == PieceType::QUEEN)
+            attackers |= attacks::rookAttacks(Square(to), occ) & rooks;
+        attackers &= occ;
+
+        stm = ~stm;
+        balance = -balance - 1 - kPieceValue[int(lvaPt)];
+
+        if (balance >= 0) {
+            if (lvaPt == PieceType::KING && (attackers & board.occupied[int(stm)]).any())
+                stm = ~stm;
+            break;
+        }
+    }
+
+    return board.sideToMove() != stm;
+}
+
+// ─── Continuation History ──────────────────────────────────────────────
+// Histórico indexado por (peça+casa do lance anterior, peça+casa do lance
+// atual): "depois de X, Y costuma ser bom". gContPieceAt/gContToAt guardam,
+// por ply, qual foi o lance que levou a esse ply (NONE = nulo/raiz, nunca
+// escrito, fica sempre a zeros — sentinela sem necessidade de guarda extra).
+static int gContHist1[7][64][6][64];  // 1 ply atrás (lance do adversário)
+static int gContHist2[7][64][6][64];  // 2 plies atrás (o nosso lance anterior)
+static int gContPieceAt[130];
+static int gContToAt[130];
+
+static int contHistScore(int ply, PieceType curPiece, int curTo) {
+    int score = 0;
+    int p1 = gContPieceAt[ply], t1 = gContToAt[ply];
+    score += gContHist1[p1][t1][int(curPiece)][curTo];
+    if (ply >= 1) {
+        int p2 = gContPieceAt[ply - 1], t2 = gContToAt[ply - 1];
+        score += gContHist2[p2][t2][int(curPiece)][curTo] / 2;
+    }
+    return score;
+}
+
+// Non-overlapping bands: TT > capturas boas (MVV-LVA) > killers > history
+// > capturas más (SEE < 0). Capturas boas em [80000, 197500], sempre acima
+// de killers/history e abaixo do lance da TT.
+static int moveScore(const Board& board, Move m, Move ttMove, const int killers[2], int ply) {
+    if (m.data == ttMove.data) return 1000000;
+    if (m.isCapture()) {
+        PieceType attacker = board.pieceOn(m.from());
+        PieceType victim    = m.isEP() ? PieceType::PAWN : board.pieceOn(m.to());
+        int mvvLva = kPieceValue[int(victim)] * 100 - kPieceValue[int(attacker)];
+        if (seeGE(board, m, 0))
+            return 100000 + mvvLva;
+        return mvvLva / 100;  // má troca: abaixo de killers/history
+    }
+    if (m.data == killers[0]) return 18000;
+    if (m.data == killers[1]) return 17000;
+    int score = gHistory[int(board.sideToMove())][m.from()][m.to()]
+              + contHistScore(ply, board.pieceOn(m.from()), m.to());
+    return std::min(score, 16500);  // mantém-se sempre abaixo dos killers
+}
+
+struct SortedMoves {
+    Move  moves[256];
+    int   scores[256];
+    int   count;
+
+    void init(const Board& board, Move ttMove, const int killers[2], int ply) {
+        MoveList list;
+        generateMoves(const_cast<Board&>(board), list);
+        count = list.count;
+        for (int i = 0; i < count; ++i) {
+            moves[i]  = list.moves[i];
+            scores[i] = moveScore(board, list.moves[i], ttMove, killers, ply);
+        }
+    }
+
+    Move next(int& idx) {
+        int best = idx;
+        for (int i = idx+1; i < count; ++i)
+            if (scores[i] > scores[best]) best = i;
+        std::swap(moves[idx], moves[best]);
+        std::swap(scores[idx], scores[best]);
+        return moves[idx++];
+    }
+};
+
+// ─── Quiescence search ─────────────────────────────────────────────────────
+static int qsearch(Board& board, int alpha, int beta, SearchInfo& info) {
+    if (info.stopped || checkTime(info)) return 0;
+    ++info.nodes;
+
+    int standPat = staticEval(board);
+    if (standPat >= beta) return standPat;
+    if (standPat > alpha) alpha = standPat;
+
+    MoveList list;
+    generateCaptures(board, list);
+
+    for (int i = 0; i < list.count; ++i) {
+        Move m = list.moves[i];
+
+        // Delta Pruning: mesmo ganhando a peça capturada, não chega perto
+        // de alfa — não vale a pena gerar/testar esta captura.
+        if (!m.isPromo()) {
+            PieceType victim = m.isEP() ? PieceType::PAWN : board.pieceOn(m.to());
+            if (standPat + kPieceValue[int(victim)] + DELTA_MARGIN <= alpha)
+                continue;
+        }
+
+        if (!board.isLegal(m)) continue;
+        board.makeMove(m);
+        int score = -qsearch(board, -beta, -alpha, info);
+        board.unmakeMove(m);
+
+        if (info.stopped) return 0;
+        if (score >= beta) return score;
+        if (score > alpha) alpha = score;
+    }
+    return alpha;
+}
+
+// ─── Mate distance pruning ─────────────────────────────────────────────────
+static inline int mateAlpha(int alpha, int ply) {
+    return std::max(alpha, -(MATE_SCORE - ply));
+}
+static inline int mateBeta(int beta, int ply) {
+    return std::min(beta, MATE_SCORE - ply - 1);
+}
+
+// ─── killers per ply ───────────────────────────────────────────────────────
+static int gKillers[128][2];
+
+// ─── Razoring ────────────────────────────────────────────────────────────
+static constexpr int RAZOR_BASE = 300;
+static constexpr int RAZOR_MULT = 300;
+
+// ─── Reverse Futility Pruning ──────────────────────────────────────────────
+// Magnitude informada pelo Coda (RFP_MARGIN_NOIMP=43, escalado por
+// OUTPUT_SCALE_CP/400 = 408/400; sem flag "improving" ainda, por isso só
+// um valor). Por afinar com SPSA depois de validado.
+static constexpr int RFP_MAX_DEPTH = 7;
+static constexpr int RFP_MARGIN    = 44;  // 43 × 408/400
+
+// ─── Null Move Pruning ──────────────────────────────────────────────────────
+// NMP_BASE_R/NMP_DIV informados pelo Coda (7.8 / 7.5 → arredondado);
+// não são valores em cp, não se escalam por OUTPUT_SCALE_CP.
+static constexpr int NMP_MIN_DEPTH = 3;
+static constexpr int NMP_BASE_R    = 8;
+static constexpr int NMP_DIV       = 7;
+
+// ─── Late Move Reductions ───────────────────────────────────────────────
+// Tabela log(depth)*log(moveCount)/C, C=1.3 neutro (ponto de partida comum
+// a Stockfish/Reckless/Coda antes de SPSA). Limitada a depth-2 para nunca
+// reduzir abaixo de profundidade 1.
+static constexpr int LMR_MIN_DEPTH = 3;
+static constexpr int LMR_MIN_MOVES = 3;
+static constexpr double LMR_C      = 1.3;
+static int gLmrTable[64][64];
+
+static bool initLmrTable() {
+    for (int d = 1; d < 64; ++d)
+        for (int n = 1; n < 64; ++n) {
+            if (d >= LMR_MIN_DEPTH && n >= LMR_MIN_MOVES) {
+                int r = int(std::log(d) * std::log(n) / LMR_C);
+                gLmrTable[d][n] = std::min(r, d - 2);
+            } else {
+                gLmrTable[d][n] = 0;
+            }
+        }
+    return true;
+}
+static const bool gLmrInit = initLmrTable();
+
+// ─── Internal Iterative Reduction ───────────────────────────────────────
+static constexpr int IIR_MIN_DEPTH = 4;
+
+// ─── ProbCut ─────────────────────────────────────────────────────────────
+static constexpr int PROBCUT_MIN_DEPTH = 5;
+static constexpr int PROBCUT_MARGIN    = 220;  // ~ordem de SEE_PRUNE_MARGIN
+
+// ─── Singular Extensions ────────────────────────────────────────────────
+static constexpr int SE_MIN_DEPTH = 6;
+static constexpr int SE_MARGIN    = 64;
+
+// ─── Late Move Pruning ───────────────────────────────────────────────────
+// Magnitudes informadas pelo Coda (engine de referência mais próximo,
+// também 100% vibe-coded), constantes de profundidade/contagem sem escala
+// (não são cp); margens em cp escaladas por OUTPUT_SCALE_CP/400 = 408/400.
+static constexpr int LMP_MAX_DEPTH = 8;
+static constexpr int LMP_BASE      = 6;
+static constexpr int LMP_MULT      = 1;
+
+// ─── Futility Pruning ───────────────────────────────────────────────────
+static constexpr int FUTILITY_MAX_DEPTH = 8;
+static constexpr int FUTILITY_BASE      = 82;   // 80 × 408/400
+static constexpr int FUTILITY_MARGIN    = 112;  // 110 × 408/400
+
+// ─── SEE Pruning ────────────────────────────────────────────────────────
+static constexpr int SEE_PRUNE_MAX_DEPTH = 7;
+static constexpr int SEE_PRUNE_MARGIN    = 219; // 215 × 408/400
+
+// ─── History Pruning ────────────────────────────────────────────────────
+static constexpr int HIST_PRUNE_MAX_DEPTH = 8;
+static constexpr int HIST_PRUNE_MARGIN    = 1500;
+
+static bool hasNonPawnMaterial(const Board& board, Color c) {
+    return board.pieces(c, PieceType::KNIGHT).any() ||
+           board.pieces(c, PieceType::BISHOP).any() ||
+           board.pieces(c, PieceType::ROOK).any()   ||
+           board.pieces(c, PieceType::QUEEN).any();
+}
+
+// Bloqueia novo NMP recursivo até este ply — busca de verificação contra
+// zugzwang (mesmo mecanismo do Stockfish/Reckless: nmpMinPly).
+static int gNmpMinPly = 0;
+
+// ─── PVS / Alpha-Beta ─────────────────────────────────────────────────────
+static int search(Board& board, int depth, int alpha, int beta,
+                  int ply, bool pvNode, SearchInfo& info, bool prevNull = false,
+                  Move excludedMove = NULL_MOVE) {
+    if (info.stopped || checkTime(info)) return 0;
+
+    const bool root = (ply == 0);
+
+    // Empate por repetição ou regra dos 50 lances — antes de tudo, inclusive
+    // da TT (uma posição repetida não deve confiar num score de outro caminho).
+    if (!root && (board.halfmoveClock() >= 100 || board.isRepetition()))
+        return 0;
+
+    // Mate distance pruning
+    alpha = mateAlpha(alpha, ply);
+    beta  = mateBeta(beta, ply);
+    if (alpha >= beta) return alpha;
+
+    // Quiescence at leaf
+    if (depth <= 0) return qsearch(board, alpha, beta, info);
+
+    ++info.nodes;
+
+    // TT probe
+    bool ttHit = false;
+    TTEntry* tte = gTT.probe(board.hash, ttHit);
+    Move ttMove = ttHit ? Move(tte->move) : NULL_MOVE;
+    int  ttScore = ttHit ? tte->score : 0;
+
+    if (!root && ttHit && tte->depth >= depth) {
+        Bound b = tte->bound();
+        if (b == Bound::EXACT) return ttScore;
+        if (b == Bound::LOWER && ttScore >= beta) return ttScore;
+        if (b == Bound::UPPER && ttScore <= alpha) return ttScore;
+    }
+
+    const bool inCheck = board.isInCheck();
+
+    // TT eval adjustment: reaproveita a eval guardada na TT (de uma visita
+    // anterior) em vez de recalcular o forward pass da NNUE — mesmo valor,
+    // mais barato. Um só cálculo por nó, partilhado por todas as podas.
+    int rawEval = (ttHit && tte->eval != 0) ? tte->eval
+                : staticEval(board) + gOptimism[int(board.sideToMove())];
+    int eval    = rawEval + pawnCorrTerm(board);
+
+    // Razoring: eval estática muito abaixo de alfa, mesmo com várias
+    // jogadas de margem — cai direto em qsearch (ordem de consenso:
+    // razor -> RFP -> NMP).
+    if (!pvNode && !inCheck && std::abs(alpha) < MATE_SCORE - 512
+        && eval < alpha - RAZOR_BASE - RAZOR_MULT * depth * depth) {
+        return qsearch(board, alpha, beta, info);
+    }
+
+    // Reverse Futility Pruning: eval estática já muito acima de beta a
+    // poucos plies da folha — o adversário não vai deixar a posição chegar
+    // aqui, corta sem gerar lances.
+    if (!root && !pvNode && !inCheck && depth <= RFP_MAX_DEPTH) {
+        int margin = RFP_MARGIN * depth;
+        if (eval - margin >= beta)
+            return eval - margin;
+    }
+
+    // Null Move Pruning: passa a vez; se a posição continua a ganhar mesmo
+    // assim, o adversário não tem ameaça real aqui — corta. Evita-se perto
+    // de mate, em finais só de peões (risco de zugzwang), e não se confia
+    // num score de mate não comprovado vindo do ramo nulo.
+    if (!root && !pvNode && !inCheck && !prevNull && depth >= NMP_MIN_DEPTH
+        && ply >= gNmpMinPly
+        && beta < MATE_SCORE - 512
+        && hasNonPawnMaterial(board, board.sideToMove())
+        && eval >= beta) {
+        int R = NMP_BASE_R + depth / NMP_DIV;
+        if (ply + 1 < 130) {
+            gContPieceAt[ply + 1] = int(PieceType::NONE);
+            gContToAt[ply + 1]    = 0;
+        }
+        board.makeNullMove();
+        int score = -search(board, depth - 1 - R, -beta, -beta + 1, ply + 1, false, info, true);
+        board.unmakeNullMove();
+        if (info.stopped) return 0;
+
+        if (score >= beta) {
+            // Não propagar distância de mate não comprovada vinda do ramo
+            // nulo — mas mantém-se o corte com um score seguro (beta).
+            int cutScore = isMate(score) ? beta : score;
+
+            // A profundidades altas, confirma com uma busca de verificação
+            // (sem NMP até este ply) antes de confiar no corte — protege
+            // contra falsos cortes por zugzwang.
+            if (gNmpMinPly > 0 || depth < 16)
+                return cutScore;
+
+            gNmpMinPly = ply + (3 * (depth - R)) / 4;
+            int verify = search(board, depth - R, beta - 1, beta, ply, false, info, prevNull);
+            gNmpMinPly = 0;
+
+            if (info.stopped) return 0;
+            if (verify >= beta)
+                return cutScore;
+        }
+    }
+
+    // Internal Iterative Reduction: sem hash move e profundidade
+    // suficiente, a TT não tem nada para guiar a ordenação aqui — reduz-se
+    // um ply (a própria busca preenche a TT antes de voltar a este nó).
+    if (!root && !ttHit && depth >= IIR_MIN_DEPTH)
+        --depth;
+
+    // ProbCut: uma captura suficientemente boa (SEE>=0) cuja procura
+    // reduzida confirma ficar muito acima de beta — corta quase de
+    // borla, sem percorrer o resto dos lances.
+    if (!root && !pvNode && !inCheck && depth >= PROBCUT_MIN_DEPTH
+        && beta < MATE_SCORE - 512) {
+        int probCutBeta = beta + PROBCUT_MARGIN;
+        MoveList caps;
+        generateCaptures(board, caps);
+        for (int i = 0; i < caps.count; ++i) {
+            Move m = caps.moves[i];
+            if (!seeGE(board, m, 0)) continue;
+
+            board.makeMove(m);
+            if (board.isSquareAttacked(board.kingSq(~board.stm).value(), board.stm)) {
+                board.unmakeMove(m);
+                continue;
+            }
+            if (ply + 1 < 130) {
+                gContPieceAt[ply + 1] = int(board.pieceOn(m.to()));
+                gContToAt[ply + 1]    = m.to();
+            }
+
+            int score = -qsearch(board, -probCutBeta, -probCutBeta + 1, info);
+            int probCutDepth = depth - 4;
+            if (!info.stopped && score >= probCutBeta && probCutDepth > 0)
+                score = -search(board, probCutDepth, -probCutBeta, -probCutBeta + 1, ply + 1, false, info);
+            board.unmakeMove(m);
+
+            if (info.stopped) return 0;
+            if (score >= probCutBeta) return score;
+        }
+    }
+
+    // Generate and sort moves
+    const int* killers = gKillers[std::min(ply, 127)];
+    SortedMoves sm;
+    sm.init(board, ttMove, killers, ply);
+
+    int bestScore  = -INF_SCORE;
+    Move bestMove  = NULL_MOVE;
+    Bound bound    = Bound::UPPER;
+    int  idx       = 0;
+    int  legalCnt  = 0;
+    int  quietTried = 0;
+    Move triedQuiets[64];
+    int  triedQuietCount = 0;
+
+    for (int i = 0; i < sm.count; ++i) {
+        Move m = sm.next(idx);
+        if (!excludedMove.isNull() && m.data == excludedMove.data) continue;
+        bool isQuiet = !m.isCapture() && !m.isPromo();
+
+        // Late Move Pruning / Futility Pruning / History Pruning: só
+        // depois de já termos pelo menos um lance legal (nunca arriscar
+        // concluir mate/afogamento por ter prunado tudo). Lances tranquilos
+        // tardios a pouca profundidade raramente mudam o resultado.
+        if (isQuiet && !root && !pvNode && !inCheck && legalCnt >= 1) {
+            if (depth <= LMP_MAX_DEPTH && quietTried > LMP_BASE + LMP_MULT * depth * depth) {
+                ++quietTried;
+                continue;
+            }
+            if (depth <= FUTILITY_MAX_DEPTH && eval + FUTILITY_BASE + FUTILITY_MARGIN * depth <= alpha) {
+                ++quietTried;
+                continue;
+            }
+            if (depth <= HIST_PRUNE_MAX_DEPTH) {
+                int combined = gHistory[int(board.sideToMove())][m.from()][m.to()]
+                             + contHistScore(ply, board.pieceOn(m.from()), m.to());
+                if (combined < -HIST_PRUNE_MARGIN * depth) {
+                    ++quietTried;
+                    continue;
+                }
+            }
+        }
+        if (isQuiet) ++quietTried;
+
+        // SEE Pruning: captura com troca claramente perdedora a pouca
+        // profundidade — não vale a pena testar.
+        if (m.isCapture() && !root && !pvNode && !inCheck && legalCnt >= 1
+            && depth <= SEE_PRUNE_MAX_DEPTH
+            && !seeGE(board, m, -SEE_PRUNE_MARGIN * depth)) {
+            continue;
+        }
+
+        // Singular Extension: o lance da TT, testado sem ele (janela
+        // estreita abaixo do score da TT) — se nenhum outro lance chega lá,
+        // este é claramente o único bom, vale a pena aprofundar.
+        int singularExt = 0;
+        if (!root && excludedMove.isNull() && m.data == ttMove.data && depth >= SE_MIN_DEPTH
+            && ttHit && tte->depth >= depth - 3 && tte->bound() != Bound::UPPER
+            && std::abs(ttScore) < MATE_SCORE - 512) {
+            int singularBeta = ttScore - SE_MARGIN;
+            int singularDepth = (depth - 1) / 2;
+            int sScore = search(board, singularDepth, singularBeta - 1, singularBeta,
+                                 ply, false, info, prevNull, m);
+            if (!info.stopped && sScore < singularBeta)
+                singularExt = 1;
+            if (info.stopped) return 0;
+        }
+
+        board.makeMove(m);
+        // Verify move is legal (king of moving side not in check)
+        if (board.isSquareAttacked(board.kingSq(~board.stm).value(), board.stm)) {
+            board.unmakeMove(m);
+            continue;
+        }
+        ++legalCnt;
+
+        if (ply + 1 < 130) {
+            gContPieceAt[ply + 1] = int(board.pieceOn(m.to()));
+            gContToAt[ply + 1]    = m.to();
+        }
+
+        // Check Extension: lance que dá xeque aprofunda 1 ply (sequências de
+        // xeque tendem a ser forçadas/táticas). Limite de ply como rede de
+        // segurança — a deteção de empate acima já trata repetição/50 lances.
+        const bool givesCheck = board.isInCheck();
+        const int  ext = std::max((givesCheck && ply < 100) ? 1 : 0, singularExt);
+
+        int score;
+        if (legalCnt == 1) {
+            score = -search(board, depth-1+ext, -beta, -alpha, ply+1, pvNode, info);
+        } else {
+            int newDepth = depth - 1 + ext;
+            int r = 0;
+            if (depth >= LMR_MIN_DEPTH && legalCnt >= LMR_MIN_MOVES && !inCheck && !givesCheck
+                && !m.isCapture() && !m.isPromo()) {
+                r = gLmrTable[std::min(depth, 63)][std::min(legalCnt, 63)];
+                if (pvNode && r > 0) --r;
+            }
+
+            // Busca reduzida em janela nula; se bater alpha, confirma a
+            // profundidade completa antes de considerar reabrir a janela.
+            score = -search(board, newDepth - r, -alpha-1, -alpha, ply+1, false, info);
+            if (!info.stopped && score > alpha && r > 0)
+                score = -search(board, newDepth, -alpha-1, -alpha, ply+1, false, info);
+            if (!info.stopped && score > alpha && score < beta)
+                score = -search(board, newDepth, -beta, -alpha, ply+1, true, info);
+        }
+        board.unmakeMove(m);
+
+        if (info.stopped) return 0;
+
+        if (isQuiet && triedQuietCount < 64)
+            triedQuiets[triedQuietCount++] = m;
+
+        if (score > bestScore) {
+            bestScore = score;
+            bestMove  = m;
+            if (score > alpha) {
+                alpha = score;
+                bound = Bound::EXACT;
+                if (score >= beta) {
+                    if (!m.isCapture()) {
+                        gKillers[std::min(ply,127)][1] = gKillers[std::min(ply,127)][0];
+                        gKillers[std::min(ply,127)][0] = m.data;
+
+                        int& h = gHistory[int(board.sideToMove())][m.from()][m.to()];
+                        h += depth * depth;
+                        if (h > 16000) h = 16000;
+
+                        // (m.to() já não tem a peça lá — o tabuleiro já foi
+                        // desfeito acima; usa-se o valor guardado ao entrar
+                        // no lance, que ainda é válido para este m.)
+                        PieceType movedPt = PieceType(gContPieceAt[ply + 1]);
+                        int p1 = gContPieceAt[ply], t1 = gContToAt[ply];
+                        int& h1 = gContHist1[p1][t1][int(movedPt)][m.to()];
+                        h1 += depth * depth;
+                        if (h1 > 16000) h1 = 16000;
+                        if (ply >= 1) {
+                            int p2 = gContPieceAt[ply - 1], t2 = gContToAt[ply - 1];
+                            int& h2 = gContHist2[p2][t2][int(movedPt)][m.to()];
+                            h2 += depth * depth;
+                            if (h2 > 16000) h2 = 16000;
+                        }
+
+                        // Malus: lances tranquilos tentados antes deste e
+                        // que não cortaram ficam com history mais negativo
+                        // (alimenta o History Pruning de outros nós).
+                        for (int qi = 0; qi < triedQuietCount - 1; ++qi) {
+                            Move qm = triedQuiets[qi];
+                            int& hq = gHistory[int(board.sideToMove())][qm.from()][qm.to()];
+                            hq -= depth * depth;
+                            if (hq < -16000) hq = -16000;
+                        }
+                    }
+                    bound = Bound::LOWER;
+                    break;
+                }
+            }
+        }
+    }
+
+    if (legalCnt == 0) {
+        // Stalemate or checkmate
+        return board.isInCheck() ? -(MATE_SCORE - ply) : 0;
+    }
+
+    // rawEval já calculado antes do ciclo de lances (mesma posição: o
+    // tabuleiro fica sempre restaurado após cada makeMove/unmakeMove).
+    if (!inCheck && !isMate(bestScore))
+        updateCorrHist(board, rawEval, bestScore);
+
+    gTT.store(board.hash, bestScore, rawEval, bestMove, depth, bound);
+    return bestScore;
+}
+
+// ─── Iterative deepening ──────────────────────────────────────────────────
+void search(Board& board, const Limits& limits) {
+    SearchInfo info;
+    info.startMs = nowMs();
+
+    // Time management
+    if (limits.movetime > 0) {
+        info.timeLimitMs = limits.movetime;
+        info.softLimitMs = limits.movetime;
+    } else if (limits.wtime > 0 || limits.btime > 0) {
+        int myTime = (board.sideToMove() == Color::WHITE) ? limits.wtime : limits.btime;
+        int myInc  = (board.sideToMove() == Color::WHITE) ? limits.winc  : limits.binc;
+        int moves  = limits.movestogo > 0 ? limits.movestogo : 40;
+        int base   = myTime / moves + myInc;
+        info.softLimitMs = std::min(base, myTime / 2);
+        info.timeLimitMs = std::min(base * 5, myTime * 3 / 4);
+    } else if (!limits.infinite) {
+        info.timeLimitMs = 5000;  // default 5s
+        info.softLimitMs = 5000;
+    }
+
+    gTT.newSearch();
+    memset(gKillers, 0, sizeof(gKillers));
+    gNmpMinPly = 0;
+    gOptimism[0] = gOptimism[1] = 0;
+    memset(gContHist1, 0, sizeof(gContHist1));
+    memset(gContHist2, 0, sizeof(gContHist2));
+    for (int i = 0; i < 130; ++i) { gContPieceAt[i] = int(PieceType::NONE); gContToAt[i] = 0; }
+    memset(gHistory, 0, sizeof(gHistory));
+
+    Move bestMove = NULL_MOVE;
+    int maxDepth = limits.depth;
+    if (maxDepth <= 0 || maxDepth > 64) maxDepth = 64;
+    int avgScore = 0;
+    bool haveAvgScore = false;
+
+    for (int depth = 1; depth <= maxDepth; ++depth) {
+        info.stopped = false;
+
+        int score = search(board, depth, -INF_SCORE, INF_SCORE, 0, true, info);
+
+        if (info.stopped && depth > 1) break;  // discard incomplete iteration
+
+        avgScore = haveAvgScore ? (score + avgScore) / 2 : score;
+        haveAvgScore = true;
+        int us = int(board.sideToMove());
+        gOptimism[us]     = 100 * avgScore / (std::abs(avgScore) + 150);
+        gOptimism[1 - us] = -gOptimism[us];
+
+        // Retrieve best move from TT
+        bool ttHit;
+        TTEntry* tte = gTT.probe(board.hash, ttHit);
+        if (ttHit && tte->move) bestMove = Move(tte->move);
+
+        int64_t elapsed = nowMs() - info.startMs;
+        uint64_t nps = elapsed > 0 ? info.nodes * 1000 / elapsed : info.nodes;
+
+        // Format score
+        char scoreStr[32];
+        if (isMate(score)) {
+            int mateIn = (MATE_SCORE - std::abs(score) + 1) / 2;
+            snprintf(scoreStr, sizeof(scoreStr), "mate %d", score > 0 ? mateIn : -mateIn);
+        } else {
+            snprintf(scoreStr, sizeof(scoreStr), "cp %d", score);
+        }
+
+        // Format PV (just best move for now)
+        char pv[16] = {};
+        if (!bestMove.isNull()) {
+            pv[0] = 'a' + (bestMove.from() & 7);
+            pv[1] = '1' + (bestMove.from() >> 3);
+            pv[2] = 'a' + (bestMove.to() & 7);
+            pv[3] = '1' + (bestMove.to() >> 3);
+            if (bestMove.isPromo()) {
+                const char pc[] = "nbrq";
+                pv[4] = pc[bestMove.flags() & 3];
+            }
+        }
+
+        printf("info depth %d score %s nodes %llu nps %llu time %lld pv %s\n",
+               depth, scoreStr, (unsigned long long)info.nodes,
+               (unsigned long long)nps, (long long)elapsed, pv);
+        fflush(stdout);
+
+        // Soft time check — modulado pelo WDL brain (opt-in, OFF por
+        // defeito): posições decididas jogam-se mais rápido, posições
+        // críticas/equilibradas ganham mais tempo.
+        int64_t effectiveSoft = info.softLimitMs;
+        if (napoleon::wdlbrain::g_config.enabled)
+            effectiveSoft = (int64_t)(info.softLimitMs * napoleon::wdlbrain::timeFactor(board, score));
+        if (!limits.infinite && effectiveSoft > 0
+            && nowMs() - info.startMs >= effectiveSoft) break;
+    }
+    (void)0;  // suppress unused warning
+
+    // Output best move
+    char mv[8] = "0000";
+    if (!bestMove.isNull()) {
+        mv[0] = 'a' + (bestMove.from() & 7);
+        mv[1] = '1' + (bestMove.from() >> 3);
+        mv[2] = 'a' + (bestMove.to() & 7);
+        mv[3] = '1' + (bestMove.to() >> 3);
+        if (bestMove.isPromo()) {
+            const char pc[] = "nbrq";
+            mv[4] = pc[bestMove.flags() & 3];
+            mv[5] = '\0';
+        } else {
+            mv[4] = '\0';
+        }
+    }
+    printf("bestmove %s\n", mv);
+    fflush(stdout);
+}
+
+int seeValue(const Board& board, Move m) {
+    int lo = -2000, hi = 2000;
+    while (lo < hi) {
+        int mid = (lo + hi + 1) / 2;
+        if (seeGE(board, m, mid)) lo = mid;
+        else hi = mid - 1;
+    }
+    return lo;
+}
