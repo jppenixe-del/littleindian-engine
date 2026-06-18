@@ -22,6 +22,7 @@ struct SearchInfo {
     int64_t  startMs  = 0;
     int64_t  timeLimitMs = 0;  // hard stop
     int64_t  softLimitMs = 0;  // soft stop (check after root)
+    uint64_t nodeLimit  = 0;   // "go nodes N" (0 = sem limite)
 };
 
 // Score constants

@@ -18,6 +18,10 @@ static int64_t nowMs() {
 
 static bool checkTime(SearchInfo& info) {
     if (info.stopped) return true;
+    if (info.nodeLimit > 0 && info.nodes >= info.nodeLimit) {
+        info.stopped = true;
+        return true;
+    }
     if ((info.nodes & 2047) == 0) {
         if (info.timeLimitMs > 0 && nowMs() >= info.startMs + info.timeLimitMs) {
             info.stopped = true;
@@ -86,6 +90,7 @@ static void updateCorrHist(const Board& board, int rawEval, int bestScore) {
 static const int kPieceValue[6] = { 100, 325, 325, 500, 975, 20000 };
 static constexpr int DELTA_MARGIN = 359;  // 352 (Coda QS_DELTA_MARGIN) × 408/400
 static int gHistory[2][64][64];
+static int gCaptureHistory[2][6][6];   // [lado][atacante][vítima] — bónus/malus de capturas
 
 // ─── Material/Score Optimism ────────────────────────────────────────────
 // Enviesa a eval a favor de quem está a ganhar na tendência da busca
@@ -217,8 +222,11 @@ static int moveScore(const Board& board, Move m, Move ttMove, const int killers[
         PieceType attacker = board.pieceOn(m.from());
         PieceType victim    = m.isEP() ? PieceType::PAWN : board.pieceOn(m.to());
         int mvvLva = kPieceValue[int(victim)] * 100 - kPieceValue[int(attacker)];
+        // Capture History: ajuste fino DENTRO das boas/más capturas — não troca a
+        // ordem grosseira de SEE/MVV-LVA (perturbação pequena vs. mvvLva).
+        int capHist = gCaptureHistory[int(board.sideToMove())][int(attacker)][int(victim)];
         if (seeGE(board, m, 0))
-            return 100000 + mvvLva;
+            return 100000 + mvvLva + capHist / 64;
         return mvvLva / 100;  // má troca: abaixo de killers/history
     }
     if (m.data == killers[0]) return 18000;
@@ -618,6 +626,9 @@ static int search(Board& board, int depth, int alpha, int beta,
     int  quietTried = 0;
     Move triedQuiets[64];
     int  triedQuietCount = 0;
+    Move triedCaptures[64];
+    PieceType triedCaptureVictims[64];
+    int  triedCaptureCount = 0;
 
     for (int i = 0; i < sm.count; ++i) {
         Move m = sm.next(idx);
@@ -672,6 +683,8 @@ static int search(Board& board, int depth, int alpha, int beta,
             if (info.stopped) return 0;
         }
 
+        PieceType capturedVictim = m.isCapture()
+            ? (m.isEP() ? PieceType::PAWN : board.pieceOn(m.to())) : PieceType::NONE;
         MoveDelta delta = computeMoveDelta(board, m);
         board.makeMove(m);
         // Verify move is legal (king of moving side not in check)
@@ -720,6 +733,10 @@ static int search(Board& board, int depth, int alpha, int beta,
 
         if (isQuiet && triedQuietCount < 64)
             triedQuiets[triedQuietCount++] = m;
+        else if (m.isCapture() && triedCaptureCount < 64) {
+            triedCaptures[triedCaptureCount] = m;
+            triedCaptureVictims[triedCaptureCount++] = capturedVictim;
+        }
 
         if (score > bestScore) {
             bestScore = score;
@@ -728,6 +745,22 @@ static int search(Board& board, int depth, int alpha, int beta,
                 alpha = score;
                 bound = Bound::EXACT;
                 if (score >= beta) {
+                    if (m.isCapture()) {
+                        // Capture History: bónus à captura que cortou, malus
+                        // às tentadas antes que não cortaram — mesmo esquema
+                        // do history de quiets, só que indexado por
+                        // (lado, atacante, vítima) em vez de (from, to).
+                        int side = int(board.sideToMove());
+                        int& ch = gCaptureHistory[side][int(board.pieceOn(m.from()))][int(capturedVictim)];
+                        ch += depth * depth;
+                        if (ch > 16000) ch = 16000;
+                        for (int ci = 0; ci < triedCaptureCount - 1; ++ci) {
+                            Move cm = triedCaptures[ci];
+                            int& chq = gCaptureHistory[side][int(board.pieceOn(cm.from()))][int(triedCaptureVictims[ci])];
+                            chq -= depth * depth;
+                            if (chq < -16000) chq = -16000;
+                        }
+                    }
                     if (!m.isCapture()) {
                         gKillers[std::min(ply,127)][1] = gKillers[std::min(ply,127)][0];
                         gKillers[std::min(ply,127)][0] = m.data;
@@ -786,6 +819,7 @@ static int search(Board& board, int depth, int alpha, int beta,
 void search(Board& board, const Limits& limits) {
     SearchInfo info;
     info.startMs = nowMs();
+    info.nodeLimit = limits.nodes;
 
     // Time management
     if (limits.movetime > 0) {
@@ -811,6 +845,7 @@ void search(Board& board, const Limits& limits) {
     memset(gContHist2, 0, sizeof(gContHist2));
     for (int i = 0; i < 130; ++i) { gContPieceAt[i] = int(PieceType::NONE); gContToAt[i] = 0; }
     memset(gHistory, 0, sizeof(gHistory));
+    memset(gCaptureHistory, 0, sizeof(gCaptureHistory));
 
     // Acumulador incremental: refresh completo na raiz (ply 0), depois cada
     // makeMove/unmakeMove só empurra/recua deltas (evalPush/evalPop acima).
