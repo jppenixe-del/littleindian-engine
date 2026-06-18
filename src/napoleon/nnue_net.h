@@ -28,6 +28,7 @@ namespace napoleon::nnue
 {
 
 bool load(const std::string& path);   // détecte NapK9 (magic) ou .nnue Stockfish
+bool li11Loaded();                     // 🦅 true se a rede ativa é do formato LI11 (magic NAPKLI11)
 bool loadEmbedded();                   // 🦅 charge la rede embutida dans le binaire
 bool hasEmbeddedNet();                 // true si une rede est embutida
 bool hasEmbeddedSmallNet();            // 🦅 true se a small (128) está embebida

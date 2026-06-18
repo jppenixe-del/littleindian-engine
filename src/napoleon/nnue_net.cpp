@@ -18,6 +18,11 @@
 namespace napoleon::nnue
 {
 
+// 🦅 LI11 — declarações antecipadas (definidas perto do fim do ficheiro, ver bloco LI11).
+static bool loadLI11(const std::vector<uint8_t>& buf);
+static int evaluateLI11Impl(const Board& board);
+bool li11Loaded();
+
 // 🦅 Rede embutida (définie dans embedded_net.cpp via .incbin).
 const uint8_t* embeddedNetData();
 size_t         embeddedNetSize();
@@ -1146,6 +1151,7 @@ static float runHead(const Head& h, int bucket, const uint8_t* concat, int l1_in
 
 int evaluate(const Board& board, int headIdx)
 {
+    if (li11Loaded()) return evaluateLI11Impl(board);   // 🦅 LI11 tem prioridade se carregada
     if (!g_net.loaded) return 0;
 
     const int L1 = g_net.L1;
@@ -1535,6 +1541,12 @@ void evaluateAllHeads(const Board& board, int& bulletScore, int& smallScore, int
     smallScore  = finalize(runHead(hSmall,  bucket, concat, l1_in));
     bigScore    = finalize(runHead(g_net.big, bucket, concat, l1_in));
 }
+
+static void li11Reset();   // 🦅 declarado aqui, definido junto do resto do bloco LI11.
+                            //   Chamado só em load()/loadEmbedded() (a rede PRINCIPAL) — NÃO
+                            //   aqui dentro, pois loadFromBytes também serve loadIntoNet()
+                            //   (a small do sistema dual), que é ortogonal à LI11.
+
 static bool loadFromBytes(const std::vector<uint8_t>& buf)
 {
     long size = (long)buf.size();
@@ -1544,6 +1556,11 @@ if (g_nnueVerbose) std::fprintf(stderr, "🦅 [NNUE] Format NapK9 détecté.\n")
         bool ok = loadNapK9(buf);
 if (g_nnueVerbose) if (ok) std::fprintf(stderr, "🦅 [NNUE] NapK9 chargé (L1=%d).\n", g_net.L1);
         return ok;
+    }
+    if (size >= 8 && std::memcmp(buf.data(), "NAPKLI11", 8) == 0)
+    {
+        if (g_nnueVerbose) std::fprintf(stderr, "🦅 [NNUE] Formato LI11 detetado.\n");
+        return loadLI11(buf);
     }
     return false;
 }
@@ -1567,6 +1584,7 @@ bool load(const std::string& path)
     bool hadSmall = g_netSmall.loaded;
     g_netBig = Network{};
     g_netPtr = &g_netBig; g_netIdx = 0;
+    li11Reset();   // 🦅 limpa qualquer LI11 anterior — esta é a rede PRINCIPAL nova
     FILE* f = std::fopen(path.c_str(), "rb");
     if (!f) return false;
     std::fseek(f, 0, SEEK_END);
@@ -1632,8 +1650,8 @@ if (g_nnueVerbose) std::fprintf(stderr, "🦅 [NNUE] Small net embutida (%zu oct
 }
 
 void unload() { g_netBig = Network{}; g_netSmall = Network{}; g_dualLoaded = false;
-                g_netPtr = &g_netBig; g_netIdx = 0; }
-bool isLoaded() { return g_netBig.loaded; }
+                g_netPtr = &g_netBig; g_netIdx = 0; li11Reset(); }
+bool isLoaded() { return g_netBig.loaded || li11Loaded(); }
 bool dualLoaded() { return g_dualLoaded; }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1913,5 +1931,253 @@ float chaosScore(const Board& board)
 
     float chaos = 1.0f / (1.0f + std::exp(-logit));
     return std::clamp(chaos, 0.0f, 1.0f);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 🦅 LI11 — nova arquitetura (L1=512 por defeito, mas qualquer L1 par serve).
+//   Formato PRÓPRIO (magic "NAPKLI11"), separado do NapK9/V9-V10 antigo de propósito —
+//   evita qualquer risco de tocar no caminho de carga/avaliação já em produção.
+//   Ideias lidas conceptualmente do código real do SF (GPL-3.0, sem copiar nada — ver
+//   tools/sf_nnue_interpret.cpp desta sessão), adaptadas à nossa escala (ver
+//   project_li11_design na memória, não copiar as constantes deles literalmente):
+//     1. Ativação em pares: clip(acc,0,QA) em todo o L1, depois multiplica metade×metade
+//        (em vez do screlu/concat antigo) → L1/2 "features" por perspetiva, L1 no total
+//        depois de concat us+them (a mesma largura do acumulador, por coincidência feliz
+//        do corte a meio).
+//     2. FC0 dense_in(=L1) → 33 (32 reais + 1 de salto, soma direta no fim, sem ativação).
+//     3. Os 32 reais levam DUAS ativações em paralelo (quadrado-cortada + cortada simples),
+//        concatenadas (64) → FC1(64→32) → cortada → FC2(32→8 buckets, escolhe-se 1).
+//   SEM acumulador incremental/Finny ainda — refresh completo a cada eval (mais simples,
+//   "correção antes de velocidade", mesmo padrão que chaosScore() já usa nesta base de
+//   código). Otimizar depois de validado em SPRT, não antes.
+// ═══════════════════════════════════════════════════════════════════════════
+struct Li11Network
+{
+    int L1 = 0;
+    float qa = 255.0f;       // escala acumulador/psqt (igual ao NapK9 antigo)
+    float qbFc = 64.0f;      // escala fc0/fc1
+    float qbFc2 = 64.0f * 64.0f;  // escala fc2 (cadeia acumula qbFc duas vezes)
+    std::vector<int16_t> accBias, accWeight;   // [L1] , [TOTAL_FEATURES*L1]
+    std::vector<int32_t> psqt;                  // [TOTAL_FEATURES*MATERIAL_BUCKETS]
+    std::vector<int8_t>  fc0_w; std::vector<int32_t> fc0_b;   // [33*L1] , [33]   (row-major [out][in])
+    std::vector<int8_t>  fc1_w; std::vector<int32_t> fc1_b;   // [32*64] , [32]
+    std::vector<int8_t>  fc2_w; std::vector<int32_t> fc2_b;   // [8*32]  , [8]
+    bool hasThreats = false;
+    bool fullThreats = false;
+    std::vector<int16_t> threatWeight;   // [THREAT_FEATURES_FULL*L1] ou [640*L1]
+    bool loaded = false;
+};
+static Li11Network g_li11;
+static void li11Reset() { g_li11 = Li11Network{}; }
+
+static constexpr int LI11_FC0_REAL = 32, LI11_FC0_TOTAL = 33, LI11_FC1_OUT = 32;
+
+bool li11Loaded() { return g_li11.loaded; }
+
+static bool loadLI11(const std::vector<uint8_t>& buf)
+{
+    if (buf.size() < 24) return false;
+    uint32_t L1, qa, qbFc, qbFc2;
+    std::memcpy(&L1,     buf.data() + 8,  4);
+    std::memcpy(&qa,     buf.data() + 12, 4);
+    std::memcpy(&qbFc,   buf.data() + 16, 4);
+    std::memcpy(&qbFc2,  buf.data() + 20, 4);
+    if ((int)L1 > MAX_L1 || L1 == 0 || (L1 % 2) != 0) {
+        std::fprintf(stderr, "🔴 [LI11] L1=%u inválido (>MAX_L1 ou ímpar)\n", L1);
+        return false;
+    }
+
+    g_li11 = Li11Network{};
+    g_li11.L1 = (int)L1; g_li11.qa = (float)qa; g_li11.qbFc = (float)qbFc; g_li11.qbFc2 = (float)qbFc2;
+    size_t pos = 24;
+
+    { uint32_t cs; const uint8_t* c = readChunk(buf, pos, cs); if (!c) return false;
+      g_li11.accBias.resize(L1); lebI16(c, cs, g_li11.accBias.data(), L1); }
+
+    { uint32_t cs; const uint8_t* c = readChunk(buf, pos, cs); if (!c) return false;
+      g_li11.accWeight.assign((size_t)TOTAL_FEATURES * L1 + 32, 0);
+      lebI16(c, cs, g_li11.accWeight.data(), (size_t)TOTAL_FEATURES * L1); }
+
+    { uint32_t cs; const uint8_t* c = readChunk(buf, pos, cs); if (!c) return false;
+      g_li11.psqt.assign((size_t)TOTAL_FEATURES * MATERIAL_BUCKETS + 32, 0);
+      lebI32(c, cs, g_li11.psqt.data(), (size_t)TOTAL_FEATURES * MATERIAL_BUCKETS); }
+
+    auto loadDense = [&](std::vector<int8_t>& w, std::vector<int32_t>& b, size_t nIn, size_t nOut) -> bool {
+        uint32_t cw; const uint8_t* wp = readChunk(buf, pos, cw); if (!wp) return false;
+        std::vector<int16_t> tmp(nIn * nOut);
+        lebI16(wp, cw, tmp.data(), tmp.size());
+        w.assign(tmp.size() + 32, 0);
+        for (size_t i = 0; i < tmp.size(); ++i) w[i] = (int8_t)std::clamp<int>(tmp[i], -127, 127);
+        uint32_t cb; const uint8_t* bp = readChunk(buf, pos, cb); if (!bp) return false;
+        b.resize(nOut); lebI32(bp, cb, b.data(), nOut);
+        return true;
+    };
+    if (!loadDense(g_li11.fc0_w, g_li11.fc0_b, L1,  LI11_FC0_TOTAL)) return false;
+    if (!loadDense(g_li11.fc1_w, g_li11.fc1_b, 64,  LI11_FC1_OUT))   return false;
+    if (!loadDense(g_li11.fc2_w, g_li11.fc2_b, LI11_FC1_OUT, MATERIAL_BUCKETS)) return false;
+
+    // threats — bloco opcional, mesmo padrão do NapK9 antigo (ausente → hasThreats=false).
+    {
+        uint32_t cs; const uint8_t* c = readChunk(buf, pos, cs);
+        if (c) {
+            g_li11.fullThreats = true;   // LI11 só suporta o full (9216) — não há modo 640 aqui.
+            const size_t nThr = (size_t)THREAT_FEATURES_FULL;
+            const size_t need = nThr * L1;
+            g_li11.threatWeight.assign(need + 16, 0);
+            lebI16(c, cs, g_li11.threatWeight.data(), need);
+            bool nonZero = false;
+            for (int16_t v : g_li11.threatWeight) if (v != 0) { nonZero = true; break; }
+            g_li11.hasThreats = nonZero;
+        }
+    }
+
+    g_li11.loaded = true;
+    if (g_nnueVerbose) std::fprintf(stderr, "🦅 [LI11] carregada: L1=%d qa=%.0f qbFc=%.0f hasThreats=%d\n",
+                                    g_li11.L1, g_li11.qa, g_li11.qbFc, (int)g_li11.hasThreats);
+    return true;
+}
+
+// Refresh completo (sem incremental/Finny ainda — ver nota no topo do bloco LI11).
+static void li11FullResolve(const Board& board, int L1, int b_w, int b_b, int32_t* accW, int32_t* accB)
+{
+    for (int i = 0; i < L1; ++i) { accW[i] = g_li11.accBias[i]; accB[i] = g_li11.accBias[i]; }
+    for (int c = 0; c < 2; ++c)
+        for (int t = 0; t < 6; ++t)
+        {
+            uint64_t bb = board.pieces(static_cast<Color>(c), static_cast<PieceType>(t)).value();
+            int pc = engCode(t, c);
+            int kindW = pieceKindW(pc), kindB = pieceKindB(pc);
+            uint64_t v = bb;
+            while (v) {
+                int sq = std::countr_zero(v); v &= v - 1;
+                if (kindW != -1) {
+                    const int16_t* w = &g_li11.accWeight[(size_t)makeFeat(b_w, kindW, sq) * L1];
+                    for (int i = 0; i < L1; ++i) accW[i] += w[i];
+                }
+                if (kindB != -1) {
+                    const int16_t* w = &g_li11.accWeight[(size_t)makeFeat(b_b, kindB, sq ^ 56) * L1];
+                    for (int i = 0; i < L1; ++i) accB[i] += w[i];
+                }
+            }
+        }
+}
+
+// Dense layer genérica: out[o] = bias[o] + sum_i w[o*nIn+i] * in[i] (in: u8, w: i8, out: i32).
+static inline void li11Dense(const int8_t* w, const int32_t* b, const uint8_t* in,
+                             int nIn, int nOut, int32_t* out)
+{
+    for (int o = 0; o < nOut; ++o) {
+        int64_t sum = b[o];
+        const int8_t* row = &w[(size_t)o * nIn];
+        for (int i = 0; i < nIn; ++i) sum += (int32_t)row[i] * (int32_t)in[i];
+        out[o] = (int32_t)sum;
+    }
+}
+
+static int evaluateLI11Impl(const Board& board)
+{
+    const int L1 = g_li11.L1;
+    const int stm = static_cast<int>(board.sideToMove());
+    int kw = board.kingSq(Color::WHITE).value();
+    int kb = board.kingSq(Color::BLACK).value();
+    int b_w = BUCKET_MAP[kw];
+    int b_b = BUCKET_MAP[kb ^ 56];
+
+    alignas(32) int32_t accW[MAX_L1], accB[MAX_L1];
+    li11FullResolve(board, L1, b_w, b_b, accW, accB);
+
+    if (g_li11.hasThreats && g_threatsEnabled)
+    {
+        alignas(32) int16_t thrW[MAX_L1] = {0}; alignas(32) int16_t thrB[MAX_L1] = {0};
+        int thr[512];
+        Bitboard attackedBy[2][6];
+        computeAttackMapsByType(board, attackedBy);
+        int nW = gatherThreatsFull(board, 0, thr, attackedBy);
+        for (int k = 0; k < nW; ++k) addThreatRowI16(thrW, &g_li11.threatWeight[(size_t)thr[k] * L1], L1);
+        int nB = gatherThreatsFull(board, 1, thr, attackedBy);
+        for (int k = 0; k < nB; ++k) addThreatRowI16(thrB, &g_li11.threatWeight[(size_t)thr[k] * L1], L1);
+        fuseI16intoI32(accW, thrW, L1);
+        fuseI16intoI32(accB, thrB, L1);
+    }
+
+    int pieceCount = 0;
+    for (int c = 0; c < 2; ++c) for (int t = 0; t < 6; ++t)
+        pieceCount += board.pieces(static_cast<Color>(c), static_cast<PieceType>(t)).popcount();
+    int bucket = materialBucket(pieceCount);
+
+    const int32_t* accUs   = (stm == 0) ? accW : accB;
+    const int32_t* accThem = (stm == 0) ? accB : accW;
+    const int QAi = (int)g_li11.qa;
+
+    // 1) ativação em pares: clip [0,QA] em todo o L1, depois metade × metade.
+    //    Em float seria clip(x,0,1)*clip(y,0,1) (treino); aqui em inteiro: clip [0,QA],
+    //    produto, a div por QA mantém o resultado em [0,QA] (mesma escala à entrada do FC0).
+    alignas(32) uint8_t concat[NAPK_MAX_L1 + 32] = {0};
+    auto buildPaired = [&](const int32_t* acc, uint8_t* dst) {
+        const int half = L1 / 2;
+        for (int i = 0; i < half; ++i) {
+            int a = std::clamp(acc[i],        0, QAi);
+            int b = std::clamp(acc[i + half], 0, QAi);
+            int prod = (a * b) / QAi;   // permanece em [0,QA]
+            dst[i] = (uint8_t)std::clamp(prod, 0, 255);
+        }
+    };
+    buildPaired(accUs,   concat);            // [0, L1/2)       — perspetiva própria
+    buildPaired(accThem, concat + L1 / 2);   // [L1/2, L1)      — perspetiva adversária
+
+    // 2) FC0: L1 → 33 (32 reais + 1 salto)
+    int32_t fc0_out[LI11_FC0_TOTAL];
+    li11Dense(g_li11.fc0_w.data(), g_li11.fc0_b.data(), concat, L1, LI11_FC0_TOTAL, fc0_out);
+
+    // 3) duas ativações nos 32 reais, concatenadas (64)
+    alignas(32) uint8_t concat64[64] = {0};
+    for (int i = 0; i < LI11_FC0_REAL; ++i) {
+        int64_t sq = ((int64_t)fc0_out[i] * fc0_out[i]) / ((int64_t)g_li11.qbFc * g_li11.qbFc * 2);
+        concat64[i] = (uint8_t)std::clamp<int64_t>(sq, 0, 127);
+    }
+    for (int i = 0; i < LI11_FC0_REAL; ++i) {
+        int v = (int)(fc0_out[i] / g_li11.qbFc);
+        concat64[LI11_FC0_REAL + i] = (uint8_t)std::clamp(v, 0, 127);
+    }
+
+    // 4) FC1: 64 → 32, cortada simples
+    int32_t fc1_raw[LI11_FC1_OUT];
+    li11Dense(g_li11.fc1_w.data(), g_li11.fc1_b.data(), concat64, 64, LI11_FC1_OUT, fc1_raw);
+    alignas(32) uint8_t fc1_act[LI11_FC1_OUT];
+    for (int i = 0; i < LI11_FC1_OUT; ++i)
+        fc1_act[i] = (uint8_t)std::clamp((int)(fc1_raw[i] / g_li11.qbFc), 0, 127);
+
+    // 5) FC2: 32 → 8 buckets, escolhe-se 1
+    int32_t fc2_out[MATERIAL_BUCKETS];
+    li11Dense(g_li11.fc2_w.data(), g_li11.fc2_b.data(), fc1_act, LI11_FC1_OUT, MATERIAL_BUCKETS, fc2_out);
+
+    // soma final: fc2(dequant ×qbFc2) + salto(dequant ×qbFc) + psqt(dequant ×qa)
+    float out = (float)fc2_out[bucket] / g_li11.qbFc2 + (float)fc0_out[LI11_FC0_REAL] / g_li11.qbFc;
+
+    float psqtBias = 0.0f;
+    if (!g_li11.psqt.empty())
+    {
+        int64_t psW = 0, psB = 0;
+        for (int c = 0; c < 2; ++c)
+            for (int t = 0; t < 6; ++t)
+            {
+                Bitboard bb = board.pieces(static_cast<Color>(c), static_cast<PieceType>(t));
+                while (bb.any())
+                {
+                    int sq = bb.poplsb().value();
+                    int pc = engCode(t, c);
+                    int kWk = pieceKindW(pc);
+                    if (kWk != -1) psW += g_li11.psqt[(size_t)makeFeat(b_w, kWk, sq) * MATERIAL_BUCKETS + bucket];
+                    int kBk = pieceKindB(pc);
+                    if (kBk != -1) psB += g_li11.psqt[(size_t)makeFeat(b_b, kBk, sq ^ 56) * MATERIAL_BUCKETS + bucket];
+                }
+            }
+        float psqtUs   = (stm == 0) ? (float)psW : (float)psB;
+        float psqtThem = (stm == 0) ? (float)psB : (float)psW;
+        psqtBias = ((psqtUs - psqtThem) / g_li11.qa) / 2.0f;
+    }
+
+    int score = (int)std::lround((out + psqtBias) * OUTPUT_SCALE_CP);
+    return std::clamp(score, -3000, 3000);
 }
 }
