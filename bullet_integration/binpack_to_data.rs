@@ -53,8 +53,10 @@ use std::io::{BufWriter, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use bullet_lib::value::loader::sfbinpack::{MoveType, PieceType, Color, Square};
-// ⚠️ se Color/Square não estiverem neste módulo no teu bullet, ajusta o caminho do use acima
+use bullet_lib::value::loader::sfbinpack::{MoveType, PieceType, Color};
+// 🦅 Square não é re-exportado por bullet_lib::value::loader::sfbinpack (confirmado lendo o
+//   código-fonte real do crate sfbinpack 0.6.2 no PC) — importa-se direto do crate.
+use sfbinpack::chess::coords::Square;
 use sfbinpack::CompressedTrainingDataEntryReader;
 
 // ── PRNG sem dependências externas (xorshift64, igual ao usado em gera_finais_syzygy.rs) ──

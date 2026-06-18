@@ -172,6 +172,7 @@ fn main() {
         .filter(|&r: &usize| r > 0).unwrap_or(10).min(end_sb);
     println!("   wdl_weight = {wdl_weight} | save_rate = {save_rate_env}");
 
+    let net_id_for_print = net_id.clone();
     let schedule = TrainingSchedule {
         net_id, eval_scale: SCALE,
         steps: TrainingSteps { batch_size, batches_per_superbatch: bps,
@@ -198,7 +199,7 @@ fn main() {
     let data_loader = loader::DirectSequentialDataLoader::new(&paths);
     trainer.run(&schedule, &settings, &data_loader);
 
-    println!("🦅 FIM. checkpoints_napk/{}/", net_id);
+    println!("🦅 FIM. checkpoints_napk/{}/", net_id_for_print);
 }
 
 // ⚠️ NOTA — scale 400 vs OUTPUT_SCALE_CP do motor (408, ver docs/CLAUDE.md e src/search.cpp):
