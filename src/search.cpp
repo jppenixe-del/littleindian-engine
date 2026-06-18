@@ -829,6 +829,13 @@ void search(Board& board, const Limits& limits) {
     bool haveAvgScore = false;
     int prevScore = 0;
     bool havePrevScore = false;
+    // Best-move stability: nº de iterações consecutivas em que o melhor
+    // lance não mudou. Usa-se para encolher o tempo alocado quando a
+    // decisão já está estável há várias profundidades (ver soft time
+    // check abaixo) — ideia comum a Stockfish/Reckless, parâmetros aqui
+    // neutros (BM_STABILITY_MAX/etapa), por afinar com SPSA depois.
+    static constexpr int BM_STABILITY_MAX = 8;
+    int bestMoveStability = 0;
 
     for (int depth = 1; depth <= maxDepth; ++depth) {
         info.stopped = false;
@@ -868,9 +875,15 @@ void search(Board& board, const Limits& limits) {
         gOptimism[1 - us] = -gOptimism[us];
 
         // Retrieve best move from TT
+        Move prevBestMove = bestMove;
         bool ttHit;
         TTEntry* tte = gTT.probe(board.hash, ttHit);
         if (ttHit && tte->move) bestMove = Move(tte->move);
+
+        if (depth > 1 && !bestMove.isNull() && bestMove.data == prevBestMove.data)
+            bestMoveStability = std::min(bestMoveStability + 1, BM_STABILITY_MAX);
+        else
+            bestMoveStability = 0;
 
         int64_t elapsed = nowMs() - info.startMs;
         uint64_t nps = elapsed > 0 ? info.nodes * 1000 / elapsed : info.nodes;
@@ -903,11 +916,16 @@ void search(Board& board, const Limits& limits) {
         fflush(stdout);
 
         // Soft time check — modulado pelo WDL brain (opt-in, OFF por
-        // defeito): posições decididas jogam-se mais rápido, posições
-        // críticas/equilibradas ganham mais tempo.
-        int64_t effectiveSoft = info.softLimitMs;
+        // defeito: posições decididas jogam-se mais rápido, críticas
+        // ganham mais tempo) E pela best-move stability (sempre ativo:
+        // lance estável há várias profundidades → encolhe o tempo;
+        // acabou de mudar → alarga um pouco, ainda incerto).
+        static constexpr double BM_STABILITY_BASE = 1.2;
+        static constexpr double BM_STABILITY_STEP = 0.075;
+        double stabilityFactor = BM_STABILITY_BASE - BM_STABILITY_STEP * bestMoveStability;
+        int64_t effectiveSoft = (int64_t)(info.softLimitMs * stabilityFactor);
         if (napoleon::wdlbrain::g_config.enabled)
-            effectiveSoft = (int64_t)(info.softLimitMs * napoleon::wdlbrain::timeFactor(board, score));
+            effectiveSoft = (int64_t)(effectiveSoft * napoleon::wdlbrain::timeFactor(board, score));
         if (!limits.infinite && effectiveSoft > 0
             && nowMs() - info.startMs >= effectiveSoft) break;
     }
