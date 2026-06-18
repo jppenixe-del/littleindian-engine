@@ -5,11 +5,13 @@ namespace napoleon::wdl {
 
 namespace {
 // Mesma escala usada no treino (bullet_integration/napk9_train*.rs:
-// eval_scale = SCALE = 408, blend wdl_weight*resultado + (1-wdl_weight)*
-// sigmoid(cp/408)). A rede já prevê E = sigmoid(score/408) como "score
+// eval_scale = SCALE = 400, blend wdl_weight*resultado + (1-wdl_weight)*
+// sigmoid(cp/400)). A rede já prevê E = sigmoid(score/400) como "score
 // esperado" (= P(vitória) + 0.5·P(empate)) — não se inventa uma constante
-// extra aqui, respeita-se exatamente a fórmula do treino.
-constexpr double SCALE = 408.0;
+// extra aqui, respeita-se exatamente a fórmula do treino. (Era 408, alinhado
+// ao OUTPUT_SCALE_CP antigo/convenção Sirius — esse alinhamento já não existe,
+// ver commit "OUTPUT_SCALE_CP 408 -> 400" do mesmo dia.)
+constexpr double SCALE = 400.0;
 }  // namespace
 
 Probs expectedWDL(int scoreCp) {

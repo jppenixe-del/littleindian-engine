@@ -2,6 +2,7 @@
 #include "movegen.h"
 #include "napoleon/nnue_net.h"
 #include "napoleon/wdl_brain.h"
+#include "napoleon/wdl_model.h"
 #include <cstdio>
 #include <cstring>
 #include <algorithm>
@@ -1090,8 +1091,11 @@ static void searchBody(Board& board, const Limits& limits, bool isMain, uint64_t
         }
 
         if (isMain) {
-            printf("info depth %d seldepth %d multipv 1 score %s nodes %llu nps %llu time %lld pv %s\n",
-                   depth, info.selDepth, scoreStr, (unsigned long long)info.nodes,
+            napoleon::wdl::Probs wdl = napoleon::wdl::expectedWDL(score);
+            printf("info depth %d seldepth %d multipv 1 score %s wdl %d %d %d nodes %llu nps %llu time %lld pv %s\n",
+                   depth, info.selDepth, scoreStr,
+                   (int)std::lround(wdl.win * 1000.0), (int)std::lround(wdl.draw * 1000.0), (int)std::lround(wdl.loss * 1000.0),
+                   (unsigned long long)info.nodes,
                    (unsigned long long)nps, (long long)elapsed, pv);
             fflush(stdout);
         }
@@ -1139,8 +1143,11 @@ static void searchBody(Board& board, const Limits& limits, bool isMain, uint64_t
                 }
                 int64_t pvElapsed = nowMs() - info.startMs;
                 uint64_t pvNps = pvElapsed > 0 ? info.nodes * 1000 / pvElapsed : info.nodes;
-                printf("info depth %d seldepth %d multipv %d score %s nodes %llu nps %llu time %lld pv %s\n",
-                       depth, info.selDepth, pvIdx + 1, pvScoreStr, (unsigned long long)info.nodes,
+                napoleon::wdl::Probs pvWdl = napoleon::wdl::expectedWDL(pvScore);
+                printf("info depth %d seldepth %d multipv %d score %s wdl %d %d %d nodes %llu nps %llu time %lld pv %s\n",
+                       depth, info.selDepth, pvIdx + 1, pvScoreStr,
+                       (int)std::lround(pvWdl.win * 1000.0), (int)std::lround(pvWdl.draw * 1000.0), (int)std::lround(pvWdl.loss * 1000.0),
+                       (unsigned long long)info.nodes,
                        (unsigned long long)pvNps, (long long)pvElapsed, pvStr);
                 fflush(stdout);
 

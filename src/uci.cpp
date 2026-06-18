@@ -3,6 +3,7 @@
 #include "search.h"
 #include "napoleon/nnue_net.h"
 #include "napoleon/wdl_brain.h"
+#include "napoleon/wdl_model.h"
 #include "tt.h"
 #include <cstdio>
 #include <cstdlib>
@@ -372,25 +373,37 @@ void uci::loop() {
             }
             std::printf("seetest: %d/%d casos OK\n", numCases - fails, numCases);
         } else if (cmd == "d") {
-            // Display board
+            // 🦅 Display "pretty" (estilo Sirius/Stockfish): tabuleiro em caixa + FEN/key/eval/WDL.
+            const char* border = "  +---+---+---+---+---+---+---+---+\n";
+            std::printf("%s", border);
             for (int rank = 7; rank >= 0; --rank) {
-                std::printf("%d  ", rank + 1);
+                std::printf("%d ", rank + 1);
                 for (int file = 0; file < 8; ++file) {
                     int sq = rank * 8 + file;
                     PieceType pt = board.pieceOn(sq);
                     if (pt == PieceType::NONE) {
-                        std::printf(". ");
+                        std::printf("|   ");
                     } else {
                         const char* letters = "pnbrqk";
                         char c = letters[int(pt)];
                         if (board.colorOn(sq) == Color::WHITE) c = std::toupper(c);
-                        std::printf("%c ", c);
+                        std::printf("| %c ", c);
                     }
                 }
-                std::printf("\n");
+                std::printf("|\n%s", border);
             }
-            std::printf("   a b c d e f g h\n");
-            std::printf("FEN: %s\n", board.toFen().c_str());
+            std::printf("    a   b   c   d   e   f   g   h\n\n");
+            std::printf("Fen: %s\n", board.toFen().c_str());
+            std::printf("Key: %016llX\n", (unsigned long long)board.hash);
+            if (napoleon::nnue::isLoaded()) {
+                int score = napoleon::nnue::evaluate(board);
+                napoleon::wdl::Probs w = napoleon::wdl::expectedWDL(score);
+                std::printf("Eval: %+d cp (stm pov)\n", score);
+                std::printf("WDL:  %.1f%% W / %.1f%% D / %.1f%% L (stm pov)\n",
+                            w.win * 100.0, w.draw * 100.0, w.loss * 100.0);
+            } else {
+                std::printf("Eval: (sem rede carregada)\n");
+            }
         } else if (cmd == "quit" || cmd == "exit") {
             break;
         }
