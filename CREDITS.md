@@ -4,7 +4,7 @@
 
 littleindian is written from scratch for this project: board representation, bitboards, Zobrist hashing, magic-bitboard move generation, search (PVS/iterative deepening/quiescence), transposition table, time management and the UCI front-end are all original code, with no code copied from another engine.
 
-The **NapK9** evaluation format, the `nets/littleindian_1024.napk9` network, the full-threats feature definition, and the trainer in `bullet_integration/` are original work belonging to this project, carried over from prior in-house work (the `src/napoleon/` module).
+The **NapK9** evaluation format, the `nets/littleindian_1024.napk9` network, and the trainer in `bullet_integration/` are original work belonging to this project, carried over from prior in-house work (the `src/napoleon/` module). The *threats* feature concept itself originates with Stockfish (which introduced full threat features in its NNUE); Reckless later simplified/lightened the formula, and this project's full-threats implementation (`gatherThreatsFull` in `nnue_net.cpp`, `gather_threats_full` in `napk9_v10_features.rs`) follows Reckless's lighter formula, not Stockfish's original one — read **conceptually only**, no code copied (same conceptual-reference basis as the rest of this section).
 
 ## Conceptual references
 

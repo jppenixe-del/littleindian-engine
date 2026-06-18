@@ -132,7 +132,7 @@ def _biggest_bin(folder):
             if "optimiser" not in f.lower() and "state" not in f.lower()]
     return max(bins, key=os.path.getsize) if bins else None
 
-def read_juntas(path, l1):
+def read_juntas(path, l1, train_scale=400.0):
     folder = os.path.dirname(path)
     raw_path = os.path.join(folder, "raw.bin")
     if not os.path.isfile(raw_path):
@@ -164,23 +164,38 @@ def read_juntas(path, l1):
     _modo = {31745: 'FULL V10 (9216)', 23169: 'threats 640', 22529: 'SEM threats'}[n_in]
     print(f"🦅 geometria detetada: acc {n_in} inputs ({_modo}) × L1={l1}")
     ptr = [0]
-    def q(scale, shape):
+    def q(scale, shape, mult=1.0):
         size = int(np.prod(shape))
         seg = raw[ptr[0]:ptr[0]+size]; ptr[0] += size
+        if mult != 1.0: seg = seg * mult
         qv = np.sign(seg) * np.floor(np.abs(seg) * scale + 0.5)
         return np.clip(qv, -32768, 32767).astype(np.int16).reshape(shape)
+
+    # 🦅 RECONCILIAÇÃO DE ESCALA: o motor usa OUTPUT_SCALE_CP=408 fixo (src/search.cpp,
+    #   alinhado ao NormalizeToPawnValue=102 do Sirius), mas --train-scale (default 400)
+    #   é o eval_scale com que ESTA rede foi treinada (ex.: napk9_train_v10_coda.rs/
+    #   napk9_train_v10_binpack.rs usam 400, alinhado ao processo do Coda). Sem isto, todo
+    #   o score desta rede saía ~2% desviado (408/400). score=(out+psqtBias)×408; só out e
+    #   psqtBias precisam do fator — out é inteiramente determinado pela ÚLTIMA camada (l3)
+    #   de cada cabeça (escalar l3w+l3b por k escala out por k, álgebra linear simples);
+    #   psqtBias vem direto de psqtw/psqtb. acc/l1/l2 ficam tal e qual (escalá-los também
+    #   seria contar o fator a mais).
+    RESCALE = train_scale / 408.0
+    if RESCALE != 1.0:
+        print(f"  🦅 reconciliação de escala: rede treinada a {train_scale}, motor usa 408 "
+              f"→ l3/psqt × {RESCALE:.6f}")
 
     big_l2 = detect_big_l2(l1)
     S_ACC = 255; S_PSQT = 255; S_L12 = 64; S_L3 = 255 * 64
     d = {}
     # ── partilhados (acc, psqt) — primeiro no raw, como no .rs ──
     d["accw"]  = q(S_ACC, (n_in, l1)); d["accb"]  = q(S_ACC, (l1,))
-    d["psqtw"] = q(S_PSQT, (n_in, 8)); d["psqtb"] = q(S_PSQT, (8,))
+    d["psqtw"] = q(S_PSQT, (n_in, 8), mult=RESCALE); d["psqtb"] = q(S_PSQT, (8,), mult=RESCALE)
     # ── as 3 cabeças, na ORDEM dos new_affine: bullet, small, g(big) ──
     for head, (h1, h2) in [("bullet", (16, 32)), ("small", (32, 32)), ("big", (BIG_DL1, BIG_DL2))]:
         d[f"{head}_l1w"] = q(S_L12, (h1, l1*2)); d[f"{head}_l1b"] = q(S_L12, (h1,))
         d[f"{head}_l2w"] = q(S_L12, (h2, h1));   d[f"{head}_l2b"] = q(S_L12, (h2,))
-        d[f"{head}_l3w"] = q(S_L3,  (8, h2));    d[f"{head}_l3b"] = q(S_L3,  (8,))
+        d[f"{head}_l3w"] = q(S_L3,  (8, h2), mult=RESCALE); d[f"{head}_l3b"] = q(S_L3,  (8,), mult=RESCALE)
     # ── chaos a ZEROS (o juntas não treina chaos; o motor lê na mesma) ──
     d["chaos_l1w"] = np.zeros((32, l1*2), dtype=np.int16); d["chaos_l1b"] = np.zeros((32,), dtype=np.int16)
     d["chaos_l2w"] = np.zeros((16, 32), dtype=np.int16);   d["chaos_l2b"] = np.zeros((16,), dtype=np.int16)
@@ -205,6 +220,9 @@ def main():
     ap.add_argument("--out", default="/mnt/d/Nap2Siriux/nets/bullet/npk9_master_juntas.napk9")
     ap.add_argument("--l1", type=int, default=128)
     ap.add_argument("--tag", default="", help="tag do dataset (ex: 20M, 160M, 40M) p/ achar NAPKa0s_juntas_<L1>_<tag>-N")
+    ap.add_argument("--train-scale", type=float, default=400.0,
+                    help="eval_scale usado no treino (napk9_train_v10_coda.rs/_binpack.rs usam 400; "
+                         "o motor usa OUTPUT_SCALE_CP=408 fixo — reconcilia-se aqui, não no motor)")
     args = ap.parse_args()
 
     # 🦅 prefixo do checkpoint: com --tag distingue datasets (NAPKa0s_juntas_128_20M vs _160M).
@@ -251,7 +269,7 @@ def main():
         sys.exit(1)
     print(f"🦅 converter juntas (L1={args.l1}): {path}")
 
-    h = read_juntas(path, args.l1)
+    h = read_juntas(path, args.l1, args.train_scale)
 
     accw, psqtw = h["accw"], h["psqtw"]
     # 🦅 V10 auto-detetado pelo nº de linhas do acc: 31745 → full threats (9216); 23169 → 640.

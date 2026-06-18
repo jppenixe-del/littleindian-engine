@@ -30,7 +30,7 @@
 //    que 1024 (acumulador mais pequeno); ajusta com NAPK_L1 se quiseres comparar.
 
 use bullet_lib::{
-    nn::optimiser::AdamW,
+    nn::optimiser::{AdamW, AdamWParams},
     napk9_v10::{NapkInputV10, NapkV2MaterialBuckets},
     napk9_v10_binpack_loader::NapkBinpackLoader,
     trainer::{
@@ -113,16 +113,33 @@ fn main() {
             let g2 = big_l2.forward(g1).screlu();
             let out_big = big_l3.forward(g2).select(buckets) + psqt_g;
 
+            // 🦅 2026-06-18: só a "big" interessa de verdade — é a ÚNICA cabeça que o
+            // motor lê em jogo real (search.cpp só chama evaluate(board) sem headIdx).
+            // ⚠️ tentei excluir bullet/small do loss inteiramente (peso 0) — o builder do
+            // bullet exige que todo o tensor com nome em save_format esteja ALCANÇÁVEL no
+            // grafo devolvido, senão `Option::unwrap() on None` ao gravar. Em vez disso:
+            // peso 0.001 (mantém o grafo válido, gradiente desprezável — não compete pela
+            // capacidade da big, e bullet/small nunca são lidos pelo motor de qualquer forma).
             let loss = out_big.sigmoid().squared_error(targets)
-                     + out_small.sigmoid().squared_error(targets)
-                     + out_bullet.sigmoid().squared_error(targets);
+                     + (out_small.sigmoid().squared_error(targets)
+                      + out_bullet.sigmoid().squared_error(targets)) * 0.001;
             (out_big, loss)
         });
 
-    // 🔴 REMOVIDO (2026-06-18): este clipping ±0.99 (accw/psqtw) foi a causa confirmada da
-    //   rede V11 (L1=768, treino real de 317 superbatches) saturar em ±3000 mesmo em
-    //   posições simétricas. Ver napk9_train_v10_coda.rs e project_v11_eval_bug (memória) —
-    //   teste A/B (mesma amostra, mesmos superbatches, só isto a diferir) confirmou.
+    // 🦅 Clip do Coda (accw/psqtw, ±bound) — causou saturação em ±3000 quando as 3 cabeças
+    //   competiam de verdade pelo MESMO acumulador (cada uma a empurrar o gradiente em
+    //   direções diferentes). Agora que só a big treina a sério (bullet/small a peso
+    //   0.001, "saídas fantasma" estilo SF — não competem), o Coda pode fazer mais
+    //   sentido. NAPK_CLIP_BOUND>0 liga-o (default 0 = desligado, testar os dois).
+    let clip_bound: f32 = std::env::var("NAPK_CLIP_BOUND").ok().and_then(|s| s.parse().ok()).unwrap_or(0.0);
+    if clip_bound > 0.0 {
+        println!("🦅 clip ligado: accw/psqtw em ±{clip_bound}");
+        let clipping = AdamWParams { max_weight: clip_bound, min_weight: -clip_bound, ..Default::default() };
+        trainer.optimiser.set_params_for_weight("accw", clipping);
+        trainer.optimiser.set_params_for_weight("psqtw", clipping);
+    } else {
+        println!("🦅 clip desligado (NAPK_CLIP_BOUND=0)");
+    }
 
     let tag = std::env::var("NAPK_TAG").unwrap_or_default();
     let net_id = if tag.is_empty() { format!("NAPKa0s_v10bp_{l1}") } else { format!("NAPKa0s_v10bp_{l1}_{tag}") };

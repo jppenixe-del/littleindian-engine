@@ -198,6 +198,7 @@ void uci::loop() {
             std::printf("option name WdlFearStrength type spin default 50 min 0 max 100\n");
             std::printf("option name NapkIncremental type check default false\n");
             std::printf("option name MultiPV type spin default 1 min 1 max 8\n");
+            std::printf("option name UseThreats type check default true\n");
             printTunableOptions();
             std::printf("uciok\n");
         } else if (cmd == "isready") {
@@ -223,6 +224,8 @@ void uci::loop() {
                 napoleon::nnue::napkSetIncremental(value == "true");
             } else if (name == "MultiPV") {
                 setMultiPV(std::atoi(value.c_str()));
+            } else if (name == "UseThreats") {
+                napoleon::nnue::setThreatsEnabled(value == "true");
             } else if (!setTunableParam(name, std::atoi(value.c_str()))) {
                 std::printf("info string unknown option %s\n", name.c_str());
             }
@@ -259,6 +262,10 @@ void uci::loop() {
             } else {
                 std::printf("eval: no net loaded\n");
             }
+        } else if (cmd == "evalheads") {
+            int bullet, small, big;
+            napoleon::nnue::evaluateAllHeads(board, bullet, small, big);
+            std::printf("evalheads: bullet=%d small=%d big=%d (cp, stm pov)\n", bullet, small, big);
         } else if (cmd == "bench") {
             // Standard bench: a few positions at fixed depth
             static const char* BENCH_FENS[] = {
