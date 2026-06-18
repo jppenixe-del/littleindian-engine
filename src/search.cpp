@@ -261,6 +261,15 @@ struct SortedMoves {
     }
 };
 
+// ─── Node-fraction time management ─────────────────────────────────────
+// Quantos nós cada lance de raiz consumiu na última iteração completa —
+// se o melhor lance comeu quase todos os nós, a busca já está bem decidida
+// (estilo Stockfish nodesEffort); usado no soft time check da busca
+// iterativa, junto com a best-move stability.
+static Move     gRootMoves[256];
+static uint64_t gRootMoveNodes[256];
+static int      gRootMoveCount = 0;
+
 // ─── Acumulador incremental (EvalState) ────────────────────────────────────
 // Liga o NapkAccSlot (nnue_net.h/cpp, já implementado mas nunca chamado) ao
 // makeMove/unmakeMove daqui — sem isto g_napkCurrentSlot fica sempre nullptr
@@ -626,6 +635,7 @@ static int search(Board& board, int depth, int alpha, int beta,
     Bound bound    = Bound::UPPER;
     int  idx       = 0;
     int  legalCnt  = 0;
+    if (root) gRootMoveCount = 0;  // recomeça a contagem por lance desta iteração
     int  quietTried = 0;
     Move triedQuiets[64];
     int  triedQuietCount = 0;
@@ -689,6 +699,7 @@ static int search(Board& board, int depth, int alpha, int beta,
         PieceType capturedVictim = m.isCapture()
             ? (m.isEP() ? PieceType::PAWN : board.pieceOn(m.to())) : PieceType::NONE;
         MoveDelta delta = computeMoveDelta(board, m);
+        uint64_t nodesBeforeMove = root ? info.nodes : 0;
         board.makeMove(m);
         // Verify move is legal (king of moving side not in check)
         if (board.isSquareAttacked(board.kingSq(~board.stm).value(), board.stm)) {
@@ -731,6 +742,12 @@ static int search(Board& board, int depth, int alpha, int beta,
         }
         evalPop(ply);
         board.unmakeMove(m);
+
+        if (root && gRootMoveCount < 256) {
+            gRootMoves[gRootMoveCount] = m;
+            gRootMoveNodes[gRootMoveCount] = info.nodes - nodesBeforeMove;
+            ++gRootMoveCount;
+        }
 
         if (info.stopped) return 0;
 
@@ -1018,13 +1035,20 @@ void search(Board& board, const Limits& limits, uint64_t* nodesOut) {
         fflush(stdout);
 
         // Soft time check — modulado pelo WDL brain (opt-in, OFF por
-        // defeito: posições decididas jogam-se mais rápido, críticas
-        // ganham mais tempo) E pela best-move stability (sempre ativo:
-        // lance estável há várias profundidades → encolhe o tempo;
-        // acabou de mudar → alarga um pouco, ainda incerto).
+        // defeito), pela best-move stability (lance estável há várias
+        // profundidades → encolhe o tempo) E pela fração de nós no melhor
+        // lance de raiz (estilo Stockfish nodesEffort: se ele comeu quase
+        // todos os nós desta iteração, a decisão já está bem resolvida).
         double stabilityFactor = BM_STABILITY_BASE_X100 / 100.0
                                 - (BM_STABILITY_STEP_X1000 / 1000.0) * bestMoveStability;
-        int64_t effectiveSoft = (int64_t)(info.softLimitMs * stabilityFactor);
+        uint64_t bestMoveNodes = 0, iterTotalNodes = 0;
+        for (int ri = 0; ri < gRootMoveCount; ++ri) {
+            iterTotalNodes += gRootMoveNodes[ri];
+            if (gRootMoves[ri].data == bestMove.data) bestMoveNodes = gRootMoveNodes[ri];
+        }
+        double nodeFraction = iterTotalNodes > 0 ? (double)bestMoveNodes / iterTotalNodes : 0.0;
+        double nodeFactor = std::max(0.7, std::min(1.3, 1.5 - nodeFraction));
+        int64_t effectiveSoft = (int64_t)(info.softLimitMs * stabilityFactor * nodeFactor);
         if (napoleon::wdlbrain::g_config.enabled)
             effectiveSoft = (int64_t)(effectiveSoft * napoleon::wdlbrain::timeFactor(board, score));
         if (!limits.infinite && effectiveSoft > 0
