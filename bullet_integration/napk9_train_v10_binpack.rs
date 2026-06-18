@@ -20,10 +20,14 @@
 //    bug "NapkInputV10 has no field mode" do s29 cont.17, o include! já traz o features),
 //    este ficheiro p/ examples/.
 //
-//    USO: NAPK_BINPACK="/caminho/test80.binpack:/caminho/outro.binpack" NAPK_L1=1024 \
+//    USO: NAPK_BINPACK="/caminho/test80.binpack:/caminho/outro.binpack" NAPK_L1=768 \
 //           cargo run --release -p bullet_lib --example napk9_train_v10_binpack --features cuda
 //    (sem NAPK_DATA, sem NAPK_SAVERATE-por-épocas — aqui o progresso mede-se em superbatches,
 //    não há .data2 prévio p/ contar posições e calcular épocas automaticamente.)
+//
+//    L1=768 (default): o motor lê L1 da rede dinamicamente (MAX_L1=1536, nnue_net.cpp) — não
+//    há nada cravado a 1024 no lado do C++. 768 é mais leve/rápido a treinar e a avaliar do
+//    que 1024 (acumulador mais pequeno); ajusta com NAPK_L1 se quiseres comparar.
 
 use bullet_lib::{
     nn::optimiser::{AdamW, AdamWParams},
@@ -61,7 +65,7 @@ fn save_ids_all() -> Vec<SavedFormat> {
 }
 
 fn main() {
-    let l1: usize = std::env::var("NAPK_L1").ok().and_then(|s| s.parse().ok()).unwrap_or(1024);
+    let l1: usize = std::env::var("NAPK_L1").ok().and_then(|s| s.parse().ok()).unwrap_or(768);
     let threats_mode: u8 = match std::env::var("NAPK_THREATS").unwrap_or_default().as_str() {
         "none" => 0, "640" => 1, _ => 2,
     };
