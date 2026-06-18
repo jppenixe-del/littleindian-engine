@@ -33,6 +33,14 @@
 //   cargo run --release -p bullet_lib --example binpack_to_data -- in.binpack out.data [max_pos]
 //
 // ⚠️ Filtro SF (igual ao binpack_to_plain): ply>=16, sem xeque, |score|<=10000, mv Normal, destino vazio.
+//
+// 🦅 SHUFFLE EMBUTIDO (s29 cont. 22, processo "Coda"): o Coda lê o binpack a direito e baralha
+//   num buffer interno do SfBinpackLoader (binpack_buffer_mb=1024) — não tem passo separado.
+//   Nós não podemos trocar de loader (NapkInputV10 exige NapkRecordV2, não TrainingDataEntry),
+//   mas podemos ter o MESMO efeito sem 2º passo: streaming shuffle buffer (reservoir clássico,
+//   igual ao shuffle_buffer do TF/Coda) dentro deste conversor. Resultado: 1 só comando,
+//   binpack → .data2 JÁ baralhado, sem precisar do shuffle_data2.py depois.
+//   --shuffle-mb N (default 1024, default OFF se N=0) ; --seed N (default 7).
 
 use std::env;
 use std::fs::File;
@@ -44,6 +52,62 @@ use std::sync::Arc;
 use bullet_lib::value::loader::sfbinpack::{MoveType, PieceType, Color, Square};
 // ⚠️ se Color/Square não estiverem neste módulo no teu bullet, ajusta o caminho do use acima
 use sfbinpack::CompressedTrainingDataEntryReader;
+
+// ── PRNG sem dependências externas (xorshift64, igual ao usado em gera_finais_syzygy.rs) ──
+struct Rng(u64);
+impl Rng {
+    fn new(seed: u64) -> Self { Rng(seed | 1) }
+    fn next(&mut self) -> u64 {
+        let mut x = self.0; x ^= x << 13; x ^= x >> 7; x ^= x << 17; self.0 = x; x
+    }
+    fn below(&mut self, n: usize) -> usize { (self.next() % n as u64) as usize }
+}
+
+// ── shuffle buffer streaming (reservoir): mantém `cap` registos em RAM; cada novo registo
+//    troca de lugar com um slot aleatório e devolve o que saiu p/ escrever já baralhado.
+//    Equivalente ao shuffle_buffer do Coda/TF, mas a 1 passo (sem .data2 intermédio no disco). ──
+struct ShuffleBuf {
+    rec_len: usize,
+    cap: usize,
+    buf: Vec<u8>,
+    filled: usize,
+    rng: Rng,
+}
+impl ShuffleBuf {
+    fn new(rec_len: usize, cap: usize, seed: u64) -> Self {
+        Self { rec_len, cap: cap.max(1), buf: vec![0u8; cap.max(1) * rec_len], filled: 0, rng: Rng::new(seed) }
+    }
+    /// Entra um registo novo; devolve um registo pronto a escrever (None só durante o aquecimento).
+    fn push(&mut self, rec: &[u8]) -> Option<Vec<u8>> {
+        if self.filled < self.cap {
+            let off = self.filled * self.rec_len;
+            self.buf[off..off + self.rec_len].copy_from_slice(rec);
+            self.filled += 1;
+            None
+        } else {
+            let slot = self.rng.below(self.cap);
+            let off = slot * self.rec_len;
+            let mut evicted = vec![0u8; self.rec_len];
+            evicted.copy_from_slice(&self.buf[off..off + self.rec_len]);
+            self.buf[off..off + self.rec_len].copy_from_slice(rec);
+            Some(evicted)
+        }
+    }
+    /// Fim do stream: baralha o que sobrou no buffer (Fisher-Yates) e devolve tudo concatenado.
+    fn drain(&mut self) -> Vec<u8> {
+        let mut order: Vec<usize> = (0..self.filled).collect();
+        for i in (1..order.len()).rev() {
+            let j = self.rng.below(i + 1);
+            order.swap(i, j);
+        }
+        let mut out = Vec::with_capacity(self.filled * self.rec_len);
+        for &idx in &order {
+            let off = idx * self.rec_len;
+            out.extend_from_slice(&self.buf[off..off + self.rec_len]);
+        }
+        out
+    }
+}
 
 // ── BUCKET_MAP (32 king-buckets, simétrico) — IDÊNTICO ao trainvsiriux.py ──
 const BUCKET_MAP: [usize; 64] = [
@@ -350,6 +414,23 @@ fn main() {
         println!("   filtro por bucket ATIVO — quotas mb0..7: {:?}", q);
     }
 
+    // 🦅 shuffle embutido (processo "Coda" sem 2º passo): --shuffle-mb N (MB de buffer; 0=OFF).
+    //   default 1024, igual ao SYK_BINPACK_BUFFER_MB de referência. rec_len segue --v2 (112B) ou
+    //   o clássico (268B).
+    let shuffle_mb: usize = args.iter().position(|a| a == "--shuffle-mb")
+        .and_then(|i| args.get(i + 1)).and_then(|v| v.parse().ok()).unwrap_or(1024);
+    let shuffle_seed: u64 = args.iter().position(|a| a == "--seed")
+        .and_then(|i| args.get(i + 1)).and_then(|v| v.parse().ok()).unwrap_or(7);
+    let rec_len = if formato_v2 { 112 } else { 268 };
+    let mut shuf: Option<ShuffleBuf> = if shuffle_mb > 0 {
+        let cap = (shuffle_mb * 1024 * 1024) / rec_len;
+        println!("🦅 shuffle embutido ATIVO: buffer {shuffle_mb}MB ≈ {cap} registos (seed {shuffle_seed})");
+        Some(ShuffleBuf::new(rec_len, cap, shuffle_seed))
+    } else {
+        println!("🦅 shuffle embutido OFF (--shuffle-mb 0) — saída na ordem do binpack");
+        None
+    };
+
     while reader.has_next() {
 		// 🦅 Se o utilizador carregar em Ctrl+C, a flag muda e quebramos o ciclo aqui de forma limpa!
         if !running.load(Ordering::SeqCst) {
@@ -420,7 +501,10 @@ fn main() {
             rec[96] = stm; rec[97] = mb;
             rec[100..104].copy_from_slice(&cp_stm.to_le_bytes());
             rec[104..108].copy_from_slice(&wdl_stm.to_le_bytes());
-            w.write_all(&rec).ok();
+            match &mut shuf {
+                Some(sb) => { if let Some(out_rec) = sb.push(&rec) { w.write_all(&out_rec).ok(); } }
+                None => { w.write_all(&rec).ok(); }
+            }
             kept += 1;
             bucket_count[mb as usize] += 1;
             if kept % 5_000_000 == 0 { println!("   ... {kept} escritas / {seen} lidas (V2 fast)"); }
@@ -496,7 +580,10 @@ fn main() {
         buf[259] = 0;                               // padding
         buf[260..264].copy_from_slice(&final_cp.to_le_bytes());   // score f32
         buf[264..268].copy_from_slice(&final_wdl.to_le_bytes());  // wdl f32
-        w.write_all(&buf).ok();
+        match &mut shuf {
+            Some(sb) => { if let Some(out_rec) = sb.push(&buf) { w.write_all(&out_rec).ok(); } }
+            None => { w.write_all(&buf).ok(); }
+        }
         kept += 1;
         bucket_count[mb as usize] += 1;
 
@@ -511,6 +598,11 @@ fn main() {
         }
     }
 
+    if let Some(mut sb) = shuf.take() {
+        let rest = sb.drain();
+        println!("🦅 a despejar o resto do shuffle buffer ({} registos)...", rest.len() / rec_len);
+        w.write_all(&rest).ok();
+    }
     w.flush().ok();
     println!("✅ FINI: {kept} posições (.data NapkRecord) de {seen} lidas → {out_path}");
     println!("   plies na FONTE (pré-filtro): <8: {}M | 8-15: {}M | >=16: {}M  {}",
