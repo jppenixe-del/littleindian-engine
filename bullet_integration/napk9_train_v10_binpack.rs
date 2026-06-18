@@ -30,7 +30,7 @@
 //    que 1024 (acumulador mais pequeno); ajusta com NAPK_L1 se quiseres comparar.
 
 use bullet_lib::{
-    nn::optimiser::{AdamW, AdamWParams},
+    nn::optimiser::AdamW,
     napk9_v10::{NapkInputV10, NapkV2MaterialBuckets},
     napk9_v10_binpack_loader::NapkBinpackLoader,
     trainer::{
@@ -119,10 +119,10 @@ fn main() {
             (out_big, loss)
         });
 
-    // CODA: clipping mais apertado nas camadas esparsas de entrada — ver napk9_train_v10_coda.rs.
-    let stricter_clipping = AdamWParams { max_weight: 0.99, min_weight: -0.99, ..Default::default() };
-    trainer.optimiser.set_params_for_weight("accw", stricter_clipping);
-    trainer.optimiser.set_params_for_weight("psqtw", stricter_clipping);
+    // 🔴 REMOVIDO (2026-06-18): este clipping ±0.99 (accw/psqtw) foi a causa confirmada da
+    //   rede V11 (L1=768, treino real de 317 superbatches) saturar em ±3000 mesmo em
+    //   posições simétricas. Ver napk9_train_v10_coda.rs e project_v11_eval_bug (memória) —
+    //   teste A/B (mesma amostra, mesmos superbatches, só isto a diferir) confirmou.
 
     let tag = std::env::var("NAPK_TAG").unwrap_or_default();
     let net_id = if tag.is_empty() { format!("NAPKa0s_v10bp_{l1}") } else { format!("NAPKa0s_v10bp_{l1}_{tag}") };

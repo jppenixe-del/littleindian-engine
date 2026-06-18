@@ -20,7 +20,7 @@
 //    USO: NAPK_DATA=napk_sf_v2_shuffled.data2 NAPK_L1=256 NAPK_SB=800 \
 //           cargo run --release -p bullet_lib --example napk9_train_v10_coda --features cuda
 use bullet_lib::{
-    nn::optimiser::{AdamW, AdamWParams},
+    nn::optimiser::AdamW,
     napk9_v10::{NapkInputV10, NapkV2MaterialBuckets},
     trainer::{
         save::SavedFormat,
@@ -108,17 +108,14 @@ fn main() {
             (out_big, loss)
         });
 
-    // CODA: clipping mais apertado nas camadas esparsas de entrada (acc/psqt), tal como o
-    // Coda aperta l0w (peso principal) e l0f (factoriser) — mitiga blowup ao longo de
-    // centenas de superbatches. As nossas acc/psqt fazem o mesmo papel (entrada esparsa →
-    // densa, partilhada pelas 3 cabeças), por isso ganham a mesma proteção.
-    let stricter_clipping = AdamWParams {
-        max_weight: 0.99,
-        min_weight: -0.99,
-        ..Default::default()
-    };
-    trainer.optimiser.set_params_for_weight("accw", stricter_clipping);
-    trainer.optimiser.set_params_for_weight("psqtw", stricter_clipping);
+    // 🔴 REMOVIDO (2026-06-18): o clipping ±0.99 em accw/psqtw (copiado do l0w/l0f do Coda,
+    //   sem verificar se o LIMITE NUMÉRICO fazia sentido para a NOSSA escala de pesos) causava
+    //   saturação severa — bullet/small ficavam encravados em ±3000 (o clamp duro do motor) até
+    //   em posições simétricas. Testado A/B: mesma amostra, mesmo nº de superbatches, só este
+    //   clipping a diferir — sem ele a saturação desaparece. Ver memória project_v11_eval_bug
+    //   (sessão deste dia) antes de reintroduzir qualquer clipping aqui — se um dia se quiser
+    //   testar de novo, validar o LIMITE com um treino curto + "evalheads" numa posição
+    //   simétrica ANTES de comprometer um treino longo.
 
     let tag = std::env::var("NAPK_TAG").unwrap_or_default();
     let net_id = if tag.is_empty() {
