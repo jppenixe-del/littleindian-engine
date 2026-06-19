@@ -809,6 +809,20 @@ static int search(Board& board, int depth, int alpha, int beta,
             continue;
         }
 
+        // Futility Pruning para CAPTURAS: até agora só prunávamos quietos por
+        // futility — capturas também podem ser claramente inúteis a pouca
+        // profundidade (eval + valor da peça capturada + margem ainda fica
+        // abaixo de alfa). Soma-se o valor da vítima (a captura "ganha" isso)
+        // antes de comparar — gap encontrado a comparar com SF/Reckless
+        // (ambos distinguem futility de quietos vs. capturas, nós só tínhamos
+        // a versão de quietos).
+        if (m.isCapture() && !root && !pvNode && !inCheck && legalCnt >= 1
+            && depth <= FUTILITY_MAX_DEPTH) {
+            PieceType victimPt = m.isEP() ? PieceType::PAWN : board.pieceOn(m.to());
+            if (eval + FUTILITY_BASE + FUTILITY_MARGIN * depth + kPieceValue[int(victimPt)] + corrConfDiv / 4 <= alpha)
+                continue;
+        }
+
         // Singular Extension: o lance da TT, testado sem ele (janela
         // estreita abaixo do score da TT) — se nenhum outro lance chega lá,
         // este é claramente o único bom, vale a pena aprofundar.
