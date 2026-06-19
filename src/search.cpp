@@ -628,7 +628,12 @@ static int search(Board& board, int depth, int alpha, int beta,
     Move ttMove = ttHit ? Move(tte->move) : NULL_MOVE;
     int  ttScore = ttHit ? tte->score : 0;
 
-    if (!root && ttHit && tte->depth >= depth) {
+    // Gap vs SF/Reckless: perto da regra dos 50 lances, um corte de TT pode vir duma
+    // posição idêntica em bitboard mas alcançada por um caminho com OUTRA distância ao
+    // empate (graph-history interaction) — o score guardado já não é fiável aqui. Os
+    // dois motores de referência desconfiam da TT a partir de halfmoveClock alto;
+    // mitigação de correção, não só de Elo.
+    if (!root && ttHit && tte->depth >= depth && board.halfmoveClock() < 90) {
         Bound b = tte->bound();
         if (b == Bound::EXACT) return ttScore;
         if (b == Bound::LOWER && ttScore >= beta) return ttScore;
