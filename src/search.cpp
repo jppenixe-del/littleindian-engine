@@ -661,6 +661,10 @@ static int search(Board& board, int depth, int alpha, int beta,
         if (b == Bound::EXACT) return ttScore;
         if (b == Bound::LOWER && ttScore >= beta) return ttScore;
         if (b == Bound::UPPER && ttScore <= alpha) return ttScore;
+        // Gap vs SF: o bound guardado não serviu para cortar aqui (era quase certo, mas
+        // não para esta janela) — penaliza a profundidade guardada para a entrada ser
+        // substituída mais cedo, já que não está a ser útil neste contexto.
+        if (tte->depth > 0) --tte->depth;
     }
 
     const bool inCheck = board.isInCheck();
