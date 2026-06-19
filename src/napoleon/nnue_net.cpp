@@ -1970,7 +1970,14 @@ struct Li11Network
     bool loaded = false;
 };
 static Li11Network g_li11;
-static void li11Reset() { g_li11 = Li11Network{}; }
+// 🦅 contador de geração: incrementa a cada load (mesmo trocando p/ uma rede com o MESMO
+//   L1 — o caso comum ao testar vários checkpoints em sequência, ex. training/test_checkpoints.sh).
+//   Sem isto, o cache Finny/PlyStack (chave só por L1) nunca invalidava entre redes de L1
+//   igual, misturando acumulador de UMA rede com pesos de OUTRA — bug real apanhado ao
+//   testar checkpoints em lote no MESMO processo (valores no checkpoint final não batiam
+//   com um teste isolado do mesmo ficheiro).
+static std::atomic<int> g_li11Generation{0};
+static void li11Reset() { g_li11 = Li11Network{}; g_li11Generation.fetch_add(1, std::memory_order_relaxed); }
 
 static constexpr int LI11_FC0_REAL = 32, LI11_FC0_TOTAL = 33, LI11_FC1_OUT = 32;
 
@@ -2059,7 +2066,7 @@ struct Li11FinnyEntry {
     alignas(32) int32_t acc[MAX_L1];
     uint64_t bb[2][6] = {};
 };
-struct Li11FinnyTable { Li11FinnyEntry e[2][32]; int L1 = 0; };
+struct Li11FinnyTable { Li11FinnyEntry e[2][32]; int L1 = 0; int generation = -1; };
 static thread_local std::unique_ptr<Li11FinnyTable> tl_li11FinnyHolder;
 static inline Li11FinnyTable& li11Finny() {
     if (!tl_li11FinnyHolder) tl_li11FinnyHolder = std::make_unique<Li11FinnyTable>();
@@ -2074,7 +2081,7 @@ struct Li11PlyAcc {
     alignas(32) int32_t accB[MAX_L1];
     uint64_t bb[2][6];
 };
-struct Li11PlyStack { Li11PlyAcc s[260]; int L1 = 0; };
+struct Li11PlyStack { Li11PlyAcc s[260]; int L1 = 0; int generation = -1; };
 static thread_local std::unique_ptr<Li11PlyStack> tl_li11PlyHolder;
 static inline Li11PlyStack& li11Ply() {
     if (!tl_li11PlyHolder) tl_li11PlyHolder = std::make_unique<Li11PlyStack>();
@@ -2150,14 +2157,15 @@ static inline void li11ApplyDiff(const int32_t* src, int32_t* dst, int persp, in
 static void li11PlyResolve(const Board& board, int b_w, int b_b, int32_t* accWout, int32_t* accBout)
 {
     const int L1 = g_li11.L1;
+    const int gen = g_li11Generation.load(std::memory_order_relaxed);
     Li11FinnyTable& finny = li11Finny();
-    if (finny.L1 != L1) {
-        finny.L1 = L1;
+    if (finny.L1 != L1 || finny.generation != gen) {
+        finny.L1 = L1; finny.generation = gen;
         for (int p = 0; p < 2; ++p) for (int b = 0; b < 32; ++b) finny.e[p][b].init = false;
     }
     Li11PlyStack& ply = li11Ply();
-    if (ply.L1 != L1) {
-        ply.L1 = L1;
+    if (ply.L1 != L1 || ply.generation != gen) {
+        ply.L1 = L1; ply.generation = gen;
         for (auto& e : ply.s) { e.validW = e.validB = false; e.ply = -1; }
     }
 
