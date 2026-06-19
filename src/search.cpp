@@ -561,6 +561,13 @@ static int FUTILITY_MARGIN    = 110;  // OUTPUT_SCALE_CP=400 now, no 408/400 res
 static int SEE_PRUNE_MAX_DEPTH = 7;
 static int SEE_PRUNE_MARGIN    = 215; // OUTPUT_SCALE_CP=400 now, no 408/400 rescale needed
 
+// 🦅 Gap vs SF/Reckless: ambos também SEE-prunam QUIETOS (não só capturas), com limiar
+// QUADRÁTICO em depth (mais permissivo a depth baixa, mais estrito conforme depth sobe —
+// o inverso do linear que já usamos para capturas). Constante própria, nasce neutra
+// (não copiada de SF/Reckless, só a FORMA -depth² é a ideia importada).
+static int QUIET_SEE_PRUNE_MAX_DEPTH = 7;
+static int QUIET_SEE_PRUNE_MARGIN    = 20; // limiar = -MARGIN * depth * depth
+
 // ─── History Pruning ────────────────────────────────────────────────────
 static int HIST_PRUNE_MAX_DEPTH = 8;
 static int HIST_PRUNE_MARGIN    = 1500;
@@ -798,6 +805,14 @@ static int search(Board& board, int depth, int alpha, int beta,
                     continue;
                 }
             }
+            // SEE Pruning para QUIETOS: gap vs SF/Reckless — só prunávamos capturas por SEE.
+            // Um lance tranquilo que perde material na troca (ex.: mover p/ uma casa atacada
+            // sem compensação) raramente vale a pena testar a pouca profundidade.
+            if (depth <= QUIET_SEE_PRUNE_MAX_DEPTH
+                && !seeGE(board, m, -QUIET_SEE_PRUNE_MARGIN * depth * depth)) {
+                ++quietTried;
+                continue;
+            }
         }
         if (isQuiet) ++quietTried;
 
@@ -1021,6 +1036,8 @@ static const TunableParam gTunables[] = {
     { "FutilityMargin",    &FUTILITY_MARGIN,     10,   300  },
     { "SeePruneMaxDepth",  &SEE_PRUNE_MAX_DEPTH, 2,    14   },
     { "SeePruneMargin",    &SEE_PRUNE_MARGIN,    50,   500  },
+    { "QuietSeePruneMaxDepth", &QUIET_SEE_PRUNE_MAX_DEPTH, 2,  14  },
+    { "QuietSeePruneMargin",   &QUIET_SEE_PRUNE_MARGIN,    5,  60  },
     { "HistPruneMaxDepth", &HIST_PRUNE_MAX_DEPTH,2,    16   },
     { "HistPruneMargin",   &HIST_PRUNE_MARGIN,   200,  4000 },
     { "DeltaMargin",       &DELTA_MARGIN,        100,  800  },
