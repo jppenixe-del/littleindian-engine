@@ -2299,12 +2299,18 @@ static int evaluateLI11Impl(const Board& board)
     //  bias já dequantizado à parte. Ver li11Dense: out[o] = b[o] + dot, por isso isto separa
     //  os dois termos para lhes dar escalas diferentes, exatamente como o l1 antigo faz.)
 
-    // 3) duas ativações nos 32 reais (float, [0,1]), concatenadas (64)
+    // 3) duas ativações nos 32 reais, concatenadas (64). 🦅 FIX: sqrrelu() do bullet é
+    //   relu(x)² SEM limite superior (confirmado lendo crates/compiler/.../dfo.rs:
+    //   `let relu = ReLU.forward(input)?; relu * relu` — nada de clamp a 1 antes do
+    //   quadrado). Tinha implementado clamp(x,0,1)² (isso é o screlu() da arquitetura
+    //   ANTIGA, não o sqrrelu() que o treino da LI11 usa) — causava um enviesamento
+    //   crescente nunca convergia (cortava o termo quadrático onde o treino não cortava).
+    //   crelu() confirmado SIM com clamp a 1 (ReLU.forward(x).min(1)) — essa parte estava certa.
     alignas(32) float concat64[64];
     for (int i = 0; i < LI11_FC0_REAL; ++i) {
-        float c = std::clamp(fc0_out[i], 0.0f, 1.0f);
-        concat64[i] = c * c;                         // ao quadrado-cortada
-        concat64[LI11_FC0_REAL + i] = c;              // cortada simples
+        float r = std::max(fc0_out[i], 0.0f);
+        concat64[i] = r * r;                                   // sqrrelu: relu(x)², SEM clamp
+        concat64[LI11_FC0_REAL + i] = std::min(r, 1.0f);        // crelu: clamp(x,0,1)
     }
 
     // 4) FC1: 64 → 32, float, cortada simples
@@ -2335,6 +2341,16 @@ static int evaluateLI11Impl(const Board& board)
 
     // soma final: fc2 (já em float) + salto (fc0_out[32], float, SEM clamp) + psqt
     float out = fc2_out[bucket] + fc0_out[LI11_FC0_REAL];
+
+    if (getenv("LI11_DEBUG")) {
+        std::fprintf(stderr, "bucket=%d b_w=%d b_b=%d kw=%d kb=%d\n", bucket, b_w, b_b, kw, kb);
+        std::fprintf(stderr, "accUs[0..4]=%d,%d,%d,%d accThem[0..4]=%d,%d,%d,%d\n",
+                     accUs[0],accUs[1],accUs[2],accUs[3], accThem[0],accThem[1],accThem[2],accThem[3]);
+        std::fprintf(stderr, "fc0_out[0..4]=%.4f,%.4f,%.4f,%.4f skip(fc0_out[32])=%.4f\n",
+                     fc0_out[0],fc0_out[1],fc0_out[2],fc0_out[3], fc0_out[LI11_FC0_REAL]);
+        std::fprintf(stderr, "fc1_out[0..4]=%.4f,%.4f,%.4f,%.4f\n", fc1_out[0],fc1_out[1],fc1_out[2],fc1_out[3]);
+        std::fprintf(stderr, "fc2_out[bucket=%d]=%.4f  out(fc2+skip)=%.4f\n", bucket, fc2_out[bucket], out);
+    }
 
     float psqtBias = 0.0f;
     if (!g_li11.psqt.empty())
