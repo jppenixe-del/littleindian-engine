@@ -1200,8 +1200,25 @@ static void searchBody(Board& board, const Limits& limits, bool isMain, uint64_t
     // estável (ver soft time check abaixo). BM_STABILITY_* movidos p/
     // scope de ficheiro (perto de gTunables, abaixo) para SPSA os afinar.
     int bestMoveStability = 0;
+    // Verificação PREVENTIVA antes de cada profundidade nova (gap real, não só de Elo):
+    // o soft time check só corria DEPOIS de cada iteração terminar — numa posição em que
+    // uma profundidade demora 2-4x mais que a anterior (normal em ID), o motor começava-a
+    // mesmo perto do limite e só o limite DURO (bem mais generoso) a travava, ultrapassando
+    // bastante o tempo pensado para esse lance. Estima o pior caso da próxima iteração
+    // (tempo da última × fator de crescimento) e não a começa se isso já passar o soft
+    // limit mais recente. effectiveSoft/lastIterMs ficam fora do loop para serem lidos
+    // ANTES da iteração seguinte, não só depois da atual.
+    int64_t effectiveSoft = info.softLimitMs;
+    int64_t lastIterMs = 0;
+    static constexpr double ITER_GROWTH_GUESS = 2.0;
 
     for (int depth = 1; depth <= maxDepth; ++depth) {
+        if (depth > 1 && !limits.infinite && effectiveSoft > 0) {
+            int64_t elapsed = nowMs() - info.startMs;
+            if (elapsed + (int64_t)(lastIterMs * ITER_GROWTH_GUESS) > effectiveSoft)
+                break;
+        }
+        int64_t iterStartMs = nowMs();
         info.stopped = false;
         info.selDepth = 0;  // recomeça a cada iteração (estilo Stockfish: seldepth é por depth, não cumulativo)
         gRootExcludedCount = 0;  // MultiPV: recomeça a exclusão a cada depth nova
@@ -1369,9 +1386,10 @@ static void searchBody(Board& board, const Limits& limits, bool isMain, uint64_t
         }
         lastIterScore = score;
         haveLastIterScore = true;
-        int64_t effectiveSoft = (int64_t)(info.softLimitMs * stabilityFactor * nodeFactor * fallingEvalFactor);
+        effectiveSoft = (int64_t)(info.softLimitMs * stabilityFactor * nodeFactor * fallingEvalFactor);
         if (napoleon::wdlbrain::g_config.enabled)
             effectiveSoft = (int64_t)(effectiveSoft * napoleon::wdlbrain::timeFactor(board, score));
+        lastIterMs = nowMs() - iterStartMs;
         if (!limits.infinite && effectiveSoft > 0
             && nowMs() - info.startMs >= effectiveSoft) break;
     }
