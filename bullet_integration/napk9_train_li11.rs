@@ -48,7 +48,7 @@ use bullet_lib::{
         schedule::{TrainingSchedule, TrainingSteps, lr, wdl},
         settings::LocalSettings,
     },
-    value::{loader::sfbinpack::{MoveType, PieceType, TrainingDataEntry}, ValueTrainerBuilder},
+    value::{loader, loader::sfbinpack::{MoveType, PieceType, TrainingDataEntry}, ValueTrainerBuilder},
 };
 
 const SCALE: f32 = 400.0;   // motor agora usa OUTPUT_SCALE_CP=400 (ver commit do mesmo dia)
@@ -173,8 +173,20 @@ fn main() {
         entry.ply >= min_ply && !in_check && entry.score.unsigned_abs() <= 10000 && normal && dest_empty
     };
 
-    let data_loader = NapkBinpackLoader::new_concat_multiple(&paths, buffer_mb, binpack_threads, filter);
-    trainer.run(&schedule, &settings, &data_loader);
+    // 🦅 NAPK_DATA tem prioridade sobre NAPK_BINPACK: .data2 já passou pelo binpack_to_data.rs
+    // (com --dist possível, quota por bucket de material) -- usado para testar se o
+    // desbalanceamento de buckets (não suportado pelo loader on-the-fly) explica o
+    // enviesamento persistente do startpos. Ver project_li11_design / memória do dia.
+    if let Ok(data_path) = std::env::var("NAPK_DATA") {
+        let dpaths: Vec<&str> = data_path.split(':').filter(|s| !s.is_empty()).collect();
+        println!("🦅 NAPK_DATA ({} ficheiro(s), .data2 -- ignora NAPK_BINPACK)", dpaths.len());
+        for p in &dpaths { println!("   - {p}"); }
+        let data_loader = loader::DirectSequentialDataLoader::new(&dpaths);
+        trainer.run(&schedule, &settings, &data_loader);
+    } else {
+        let data_loader = NapkBinpackLoader::new_concat_multiple(&paths, buffer_mb, binpack_threads, filter);
+        trainer.run(&schedule, &settings, &data_loader);
+    }
 
     println!("🦅 FIM. checkpoints_napk/{}/", std::env::var("NAPK_TAG").unwrap_or_default());
 }
