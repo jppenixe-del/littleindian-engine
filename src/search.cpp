@@ -474,6 +474,17 @@ static inline int mateBeta(int beta, int ply) {
 // ─── killers per ply ───────────────────────────────────────────────────────
 static thread_local int gKillers[128][2];
 
+// ─── Hindsight depth adjustment ────────────────────────────────────────────
+// Ideia independente convergida pelo SF e Reckless: ao ENTRAR num nó, olha
+// para a redução LMR que o PAI aplicou a descer até aqui e para a variação
+// da eval entre o pai e agora. Se o pai reduziu MUITO e a posição não piorou,
+// a redução foi provavelmente excessiva → devolve 1 ply. Se o pai reduziu
+// pouco/nada e a eval MELHOROU muito, a redução (se houve) foi justificada e
+// ainda há margem → reduz mais 1 ply. Ajuste pequeno e local, sem tabelas
+// novas — só 2 arrays indexados por ply (mesmo padrão dos killers).
+static thread_local int gReductionAtPly[128];  // redução LMR aplicada pelo PAI a descer para esta ply
+static thread_local int gEvalAtPly[128];       // eval (corrigida) do nó nesta ply, POV de quem joga aí
+
 // ─── Aspiration Windows ──────────────────────────────────────────────────
 static int ASPIRATION_MIN_DEPTH = 4;
 static int ASPIRATION_DELTA     = 16;
@@ -611,6 +622,19 @@ static int search(Board& board, int depth, int alpha, int beta,
                 : staticEval(board) + gOptimism[int(board.sideToMove())];
     int corrTerm = pawnCorrTerm(board) + nonPawnCorrTerm(board);
     int eval    = rawEval + corrTerm;
+
+    // Hindsight depth adjustment: se o PAI reduziu MUITO a descer até aqui
+    // (gReductionAtPly[ply] >= 3), a redução pode ter sido excessiva — devolve
+    // 1 ply. Versão deliberadamente CONSERVADORA (só esta direção, sem o
+    // "reduz mais 1 ply se a eval melhorou" que o SF/Reckless também têm):
+    // não tinha confiança total no sinal exato da variação de eval que eles
+    // usam (risco real de bug de direção subtil) — esta versão só ADICIONA
+    // esforço de busca nunca remove, por isso o pior caso é só nps perdido,
+    // nunca um corte indevido por profundidade a menos do que devia.
+    if (!root && !inCheck && gReductionAtPly[std::min(ply, 127)] >= 3)
+        ++depth;
+    gEvalAtPly[std::min(ply, 127)] = eval;
+
     // |corrTerm| como sinal de confiança: quando a correção teve de ajustar muito a eval,
     // a eval estática é menos fiável aqui — alarga as margens de poda (RFP/futility/SEE)
     // proporcionalmente. Mesma ideia usada pelo SF/Reckless (correction_value.abs()/N em
@@ -650,6 +674,7 @@ static int search(Board& board, int depth, int alpha, int beta,
         }
         board.makeNullMove();
         evalPush(board, MoveDelta{}, ply);   // passa a vez: 0 peças mudam, bucket não muda
+        gReductionAtPly[std::min(ply + 1, 127)] = 0;  // NMP não é LMR — não confundir no hindsight depth adjustment
         int score = -search(board, depth - 1 - R, -beta, -beta + 1, ply + 1, false, info, true);
         evalPop(ply);
         board.unmakeNullMove();
@@ -708,8 +733,10 @@ static int search(Board& board, int depth, int alpha, int beta,
 
             int score = -qsearch(board, -probCutBeta, -probCutBeta + 1, ply + 1, info);
             int probCutDepth = depth - 4;
-            if (!info.stopped && score >= probCutBeta && probCutDepth > 0)
+            if (!info.stopped && score >= probCutBeta && probCutDepth > 0) {
+                gReductionAtPly[std::min(ply + 1, 127)] = 0;  // ProbCut não é LMR
                 score = -search(board, probCutDepth, -probCutBeta, -probCutBeta + 1, ply + 1, false, info);
+            }
             evalPop(ply);
             board.unmakeMove(m);
 
@@ -824,6 +851,7 @@ static int search(Board& board, int depth, int alpha, int beta,
 
         int score;
         if (legalCnt == 1) {
+            gReductionAtPly[std::min(ply + 1, 127)] = 0;  // sem LMR neste ramo — limpa lixo de outro nó na mesma ply
             score = -search(board, depth-1+ext, -beta, -alpha, ply+1, pvNode, info);
         } else {
             int newDepth = depth - 1 + ext;
@@ -836,9 +864,12 @@ static int search(Board& board, int depth, int alpha, int beta,
 
             // Busca reduzida em janela nula; se bater alpha, confirma a
             // profundidade completa antes de considerar reabrir a janela.
+            gReductionAtPly[std::min(ply + 1, 127)] = r;  // p/ o filho ler (hindsight depth adjustment)
             score = -search(board, newDepth - r, -alpha-1, -alpha, ply+1, false, info);
-            if (!info.stopped && score > alpha && r > 0)
+            if (!info.stopped && score > alpha && r > 0) {
+                gReductionAtPly[std::min(ply + 1, 127)] = 0;  // re-busca é a profundidade completa, sem redução
                 score = -search(board, newDepth, -alpha-1, -alpha, ply+1, false, info);
+            }
             if (!info.stopped && score > alpha && score < beta)
                 score = -search(board, newDepth, -beta, -alpha, ply+1, true, info);
         }
