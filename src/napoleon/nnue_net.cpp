@@ -22,6 +22,7 @@ namespace napoleon::nnue
 static bool loadLI11(const std::vector<uint8_t>& buf);
 static int evaluateLI11Impl(const Board& board);
 bool li11Loaded();
+static void printLI11Info();
 
 // 🦅 Rede embutida (définie dans embedded_net.cpp via .incbin).
 const uint8_t* embeddedNetData();
@@ -808,6 +809,7 @@ static void printOneNet(const char* etiqueta, const Network& n)
 }
 void printNetInfo()
 {
+    if (li11Loaded()) { printLI11Info(); return; }
     printOneNet("BIG ", g_netBig);
     printOneNet("SMALL", g_netSmall);
 }
@@ -1973,6 +1975,13 @@ static void li11Reset() { g_li11 = Li11Network{}; }
 static constexpr int LI11_FC0_REAL = 32, LI11_FC0_TOTAL = 33, LI11_FC1_OUT = 32;
 
 bool li11Loaded() { return g_li11.loaded; }
+
+static void printLI11Info()
+{
+    std::printf("info string LI11: L1=%d qa=%.0f qbFc=%.0f qbFc2=%.0f | %s | sem chaos (cabeça única)\n",
+                g_li11.L1, g_li11.qa, g_li11.qbFc, g_li11.qbFc2,
+                g_li11.hasThreats ? "threats FULL (9216)" : "sem threats");
+}
 
 static bool loadLI11(const std::vector<uint8_t>& buf)
 {
