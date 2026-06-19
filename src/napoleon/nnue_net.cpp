@@ -2046,39 +2046,179 @@ static bool loadLI11(const std::vector<uint8_t>& buf)
     return true;
 }
 
-// Refresh completo (sem incremental/Finny ainda — ver nota no topo do bloco LI11).
-static void li11FullResolve(const Board& board, int L1, int b_w, int b_b, int32_t* accW, int32_t* accB)
+// ═══════════════════════════════════════════════════════════════════════════
+// 🦅 LI11 — acumulador incremental (Finny + cadeia por ply), mesmo padrão já
+//   validado para o NapK9 antigo (finnyResolve/applyDiff/plyResolve), aqui
+//   reaplicado a g_li11. Caminho PRÓPRIO, não toca no sistema antigo — zero
+//   risco para a rede em produção. Sem isto, evaluateLI11Impl fazia refresh
+//   completo (~30 features × L1) a cada nó; com isto, só o diff de 1 lance
+//   (1-4 features) na maioria dos nós, mesma ideia do Finny do motor antigo.
+// ═══════════════════════════════════════════════════════════════════════════
+struct Li11FinnyEntry {
+    bool init = false;
+    alignas(32) int32_t acc[MAX_L1];
+    uint64_t bb[2][6] = {};
+};
+struct Li11FinnyTable { Li11FinnyEntry e[2][32]; int L1 = 0; };
+static thread_local std::unique_ptr<Li11FinnyTable> tl_li11FinnyHolder;
+static inline Li11FinnyTable& li11Finny() {
+    if (!tl_li11FinnyHolder) tl_li11FinnyHolder = std::make_unique<Li11FinnyTable>();
+    return *tl_li11FinnyHolder;
+}
+
+struct Li11PlyAcc {
+    bool validW = false, validB = false;
+    int  ply = -1;
+    int  bucketW = -1, bucketB = -1;
+    alignas(32) int32_t accW[MAX_L1];
+    alignas(32) int32_t accB[MAX_L1];
+    uint64_t bb[2][6];
+};
+struct Li11PlyStack { Li11PlyAcc s[260]; int L1 = 0; };
+static thread_local std::unique_ptr<Li11PlyStack> tl_li11PlyHolder;
+static inline Li11PlyStack& li11Ply() {
+    if (!tl_li11PlyHolder) tl_li11PlyHolder = std::make_unique<Li11PlyStack>();
+    return *tl_li11PlyHolder;
+}
+
+static void li11FinnyResolve(Li11FinnyEntry& fe, const Board& board, int persp, int bkt, int32_t* out)
 {
-    for (int i = 0; i < L1; ++i) { accW[i] = g_li11.accBias[i]; accB[i] = g_li11.accBias[i]; }
+    const int L1 = g_li11.L1;
+    if (!fe.init) {
+        for (int i = 0; i < L1; ++i) fe.acc[i] = g_li11.accBias[i];
+        for (int c = 0; c < 2; ++c) for (int t = 0; t < 6; ++t) fe.bb[c][t] = 0;
+        fe.init = true;
+    }
     for (int c = 0; c < 2; ++c)
         for (int t = 0; t < 6; ++t)
         {
-            uint64_t bb = board.pieces(static_cast<Color>(c), static_cast<PieceType>(t)).value();
+            uint64_t oldbb = fe.bb[c][t];
+            uint64_t newbb = board.pieces(static_cast<Color>(c), static_cast<PieceType>(t)).value();
+            if (oldbb == newbb) continue;
             int pc = engCode(t, c);
-            int kindW = pieceKindW(pc), kindB = pieceKindB(pc);
-            uint64_t v = bb;
-            while (v) {
-                int sq = std::countr_zero(v); v &= v - 1;
-                if (kindW != -1) {
-                    const int16_t* w = &g_li11.accWeight[(size_t)makeFeat(b_w, kindW, sq) * L1];
-                    for (int i = 0; i < L1; ++i) accW[i] += w[i];
+            int kind = (persp == 0) ? pieceKindW(pc) : pieceKindB(pc);
+            if (kind != -1) {
+                uint64_t removed = oldbb & ~newbb, added = newbb & ~oldbb;
+                uint64_t r = removed;
+                while (r) { int sq = std::countr_zero(r); r &= r - 1;
+                    int fsq = (persp == 0) ? sq : (sq ^ 56);
+                    const int16_t* w = &g_li11.accWeight[(size_t)makeFeat(bkt, kind, fsq) * L1];
+                    for (int i = 0; i < L1; ++i) fe.acc[i] -= w[i];
                 }
-                if (kindB != -1) {
-                    const int16_t* w = &g_li11.accWeight[(size_t)makeFeat(b_b, kindB, sq ^ 56) * L1];
-                    for (int i = 0; i < L1; ++i) accB[i] += w[i];
+                uint64_t ad = added;
+                while (ad) { int sq = std::countr_zero(ad); ad &= ad - 1;
+                    int fsq = (persp == 0) ? sq : (sq ^ 56);
+                    const int16_t* w = &g_li11.accWeight[(size_t)makeFeat(bkt, kind, fsq) * L1];
+                    for (int i = 0; i < L1; ++i) fe.acc[i] += w[i];
                 }
+            }
+            fe.bb[c][t] = newbb;
+        }
+    for (int i = 0; i < L1; ++i) out[i] = fe.acc[i];
+}
+
+static inline void li11ApplyDiff(const int32_t* src, int32_t* dst, int persp, int bkt,
+                                 const uint64_t oldbb[2][6], const Board& board)
+{
+    const int L1 = g_li11.L1;
+    for (int i = 0; i < L1; ++i) dst[i] = src[i];
+    for (int c = 0; c < 2; ++c)
+        for (int t = 0; t < 6; ++t)
+        {
+            uint64_t ob = oldbb[c][t];
+            uint64_t nb = board.pieces(static_cast<Color>(c), static_cast<PieceType>(t)).value();
+            if (ob == nb) continue;
+            int pc = engCode(t, c);
+            int kind = (persp == 0) ? pieceKindW(pc) : pieceKindB(pc);
+            if (kind == -1) continue;
+            uint64_t removed = ob & ~nb, added = nb & ~ob;
+            uint64_t r = removed;
+            while (r) { int sq = std::countr_zero(r); r &= r - 1;
+                int fsq = (persp == 0) ? sq : (sq ^ 56);
+                const int16_t* w = &g_li11.accWeight[(size_t)makeFeat(bkt, kind, fsq) * L1];
+                for (int i = 0; i < L1; ++i) dst[i] -= w[i];
+            }
+            uint64_t ad = added;
+            while (ad) { int sq = std::countr_zero(ad); ad &= ad - 1;
+                int fsq = (persp == 0) ? sq : (sq ^ 56);
+                const int16_t* w = &g_li11.accWeight[(size_t)makeFeat(bkt, kind, fsq) * L1];
+                for (int i = 0; i < L1; ++i) dst[i] += w[i];
             }
         }
 }
 
+static void li11PlyResolve(const Board& board, int b_w, int b_b, int32_t* accWout, int32_t* accBout)
+{
+    const int L1 = g_li11.L1;
+    Li11FinnyTable& finny = li11Finny();
+    if (finny.L1 != L1) {
+        finny.L1 = L1;
+        for (int p = 0; p < 2; ++p) for (int b = 0; b < 32; ++b) finny.e[p][b].init = false;
+    }
+    Li11PlyStack& ply = li11Ply();
+    if (ply.L1 != L1) {
+        ply.L1 = L1;
+        for (auto& e : ply.s) { e.validW = e.validB = false; e.ply = -1; }
+    }
+
+    int p = board.gamePly();
+    if (p < 0 || p >= 260) {
+        li11FinnyResolve(finny.e[0][b_w], board, 0, b_w, accWout);
+        li11FinnyResolve(finny.e[1][b_b], board, 1, b_b, accBout);
+        return;
+    }
+
+    Li11PlyAcc& cur = ply.s[p];
+    bool canChain = (p > 0 && ply.s[p - 1].ply == p - 1);
+    Li11PlyAcc& prev = ply.s[(p > 0) ? p - 1 : 0];
+
+    if (canChain && prev.validW && prev.bucketW == b_w)
+        li11ApplyDiff(prev.accW, cur.accW, 0, b_w, prev.bb, board);
+    else
+        li11FinnyResolve(finny.e[0][b_w], board, 0, b_w, cur.accW);
+
+    if (canChain && prev.validB && prev.bucketB == b_b)
+        li11ApplyDiff(prev.accB, cur.accB, 1, b_b, prev.bb, board);
+    else
+        li11FinnyResolve(finny.e[1][b_b], board, 1, b_b, cur.accB);
+
+    cur.ply = p;
+    cur.bucketW = b_w; cur.bucketB = b_b;
+    cur.validW = cur.validB = true;
+    for (int c = 0; c < 2; ++c)
+        for (int t = 0; t < 6; ++t)
+            cur.bb[c][t] = board.pieces(static_cast<Color>(c), static_cast<PieceType>(t)).value();
+
+    for (int i = 0; i < L1; ++i) { accWout[i] = cur.accW[i]; accBout[i] = cur.accB[i]; }
+}
+
 // Dense layer genérica: out[o] = bias[o] + sum_i w[o*nIn+i] * in[i] (in: u8, w: i8, out: i32).
+// 🦅 AVX2: mesma técnica do l1 do runHead() antigo (_mm256_maddubs_epi16, uint8×int8 — é
+//   exatamente o caso aqui: in=uint8 (concat pareado), w=int8). nIn precisa de ser múltiplo
+//   de 32 para o caminho vetorial; sobra fica no loop escalar (fc0: nIn=L1, sempre par/
+//   múltiplo de 32 na prática -- 512, 768, 1024... ; fallback escalar cobre qualquer caso).
 static inline void li11Dense(const int8_t* w, const int32_t* b, const uint8_t* in,
                              int nIn, int nOut, int32_t* out)
 {
     for (int o = 0; o < nOut; ++o) {
-        int64_t sum = b[o];
         const int8_t* row = &w[(size_t)o * nIn];
-        for (int i = 0; i < nIn; ++i) sum += (int32_t)row[i] * (int32_t)in[i];
+        int64_t sum = b[o];
+        int i = 0;
+#if defined(__AVX2__)
+        __m256i sum_v = _mm256_setzero_si256();
+        for (; i <= nIn - 32; i += 32) {
+            __m256i in_v = _mm256_loadu_si256((const __m256i*)&in[i]);
+            __m256i w_v  = _mm256_loadu_si256((const __m256i*)&row[i]);
+            __m256i madd = _mm256_maddubs_epi16(in_v, w_v);
+            __m256i lo = _mm256_cvtepi16_epi32(_mm256_castsi256_si128(madd));
+            __m256i hi = _mm256_cvtepi16_epi32(_mm256_extracti128_si256(madd, 1));
+            sum_v = _mm256_add_epi32(sum_v, lo);
+            sum_v = _mm256_add_epi32(sum_v, hi);
+        }
+        int32_t buf[8]; _mm256_storeu_si256((__m256i*)buf, sum_v);
+        sum += buf[0]+buf[1]+buf[2]+buf[3]+buf[4]+buf[5]+buf[6]+buf[7];
+#endif
+        for (; i < nIn; ++i) sum += (int32_t)row[i] * (int32_t)in[i];
         out[o] = (int32_t)sum;
     }
 }
@@ -2093,7 +2233,7 @@ static int evaluateLI11Impl(const Board& board)
     int b_b = BUCKET_MAP[kb ^ 56];
 
     alignas(32) int32_t accW[MAX_L1], accB[MAX_L1];
-    li11FullResolve(board, L1, b_w, b_b, accW, accB);
+    li11PlyResolve(board, b_w, b_b, accW, accB);
 
     if (g_li11.hasThreats && g_threatsEnabled)
     {
