@@ -1961,12 +1961,15 @@ struct Li11Network
     float qbFc2 = 64.0f * 64.0f;  // escala fc2 (cadeia acumula qbFc duas vezes)
     std::vector<int16_t> accBias, accWeight;   // [L1] , [TOTAL_FEATURES*L1]
     std::vector<int32_t> psqt;                  // [TOTAL_FEATURES*MATERIAL_BUCKETS]
-    std::vector<int8_t>  fc0_w; std::vector<int32_t> fc0_b;   // [33*L1] , [33]   (row-major [out][in])
-    std::vector<int8_t>  fc1_w; std::vector<int32_t> fc1_b;   // [32*64] , [32]
-    // 🦅 FIX: fc2_w quantizado a qbFc2=4096 (não 64 como fc0/fc1) -- valores reais chegam a
-    // ±8000+, NÃO cabem em int8 (-128..127). Estava a usar o mesmo loadDense (clamp a ±127)
-    // que fc0/fc1, saturando quase TODOS os pesos do FC2 aos extremos -- bug real apanhado
-    // por training/calibra_li11_fc.py (diff de até 22x entre o float puro e o C++ dequant).
+    // 🦅 fc0_w/fc1_w/fc2_w em int16_t, SEM clamp a ±127: mesma classe de bug em todos os
+    // três (clamp dimensionado p/ uma escala mais pequena do que a realmente usada),
+    // confirmado e corrigido no fc2_w primeiro (escala 4096, valores ±8000+ — saturava
+    // quase tudo). fc0_w/fc1_w (escala 64, ceiling int8 = 127/64≈1.98) NÃO estão a saturar
+    // no checkpoint sb310 testado (máximo medido 126.3/126.7, sempre <127) — mas é a mesma
+    // classe de risco latente (podia disparar com mais treino/dados diferentes), por isso
+    // corrigido por precaução e consistência, não só onde já tinha disparado.
+    std::vector<int16_t> fc0_w; std::vector<int32_t> fc0_b;   // [33*L1] , [33]   (row-major [out][in])
+    std::vector<int16_t> fc1_w; std::vector<int32_t> fc1_b;   // [32*64] , [32]
     std::vector<int16_t> fc2_w; std::vector<int32_t> fc2_b;   // [8*32]  , [8]
     bool hasThreats = false;
     bool fullThreats = false;
@@ -2022,18 +2025,8 @@ static bool loadLI11(const std::vector<uint8_t>& buf)
       g_li11.psqt.assign((size_t)TOTAL_FEATURES * MATERIAL_BUCKETS + 32, 0);
       lebI32(c, cs, g_li11.psqt.data(), (size_t)TOTAL_FEATURES * MATERIAL_BUCKETS); }
 
-    auto loadDense = [&](std::vector<int8_t>& w, std::vector<int32_t>& b, size_t nIn, size_t nOut) -> bool {
-        uint32_t cw; const uint8_t* wp = readChunk(buf, pos, cw); if (!wp) return false;
-        std::vector<int16_t> tmp(nIn * nOut);
-        lebI16(wp, cw, tmp.data(), tmp.size());
-        w.assign(tmp.size() + 32, 0);
-        for (size_t i = 0; i < tmp.size(); ++i) w[i] = (int8_t)std::clamp<int>(tmp[i], -127, 127);
-        uint32_t cb; const uint8_t* bp = readChunk(buf, pos, cb); if (!bp) return false;
-        b.resize(nOut); lebI32(bp, cb, b.data(), nOut);
-        return true;
-    };
-    // 🦅 FC2 usa escala 4096 (qbFc²), valores não cabem em int8 -- versão sem o clamp a
-    // ±127, guarda em int16_t (ver comentário junto à declaração de fc2_w).
+    // 🦅 sem clamp a ±127 (ver comentário junto à declaração de fc0_w/fc1_w/fc2_w) -- int16_t
+    // para os três, mesma forma de leitura LEB128 já usada para accWeight/threatWeight.
     auto loadDense16 = [&](std::vector<int16_t>& w, std::vector<int32_t>& b, size_t nIn, size_t nOut) -> bool {
         uint32_t cw; const uint8_t* wp = readChunk(buf, pos, cw); if (!wp) return false;
         w.assign(nIn * nOut + 32, 0);
@@ -2042,8 +2035,8 @@ static bool loadLI11(const std::vector<uint8_t>& buf)
         b.resize(nOut); lebI32(bp, cb, b.data(), nOut);
         return true;
     };
-    if (!loadDense(g_li11.fc0_w, g_li11.fc0_b, L1,  LI11_FC0_TOTAL)) return false;
-    if (!loadDense(g_li11.fc1_w, g_li11.fc1_b, 64,  LI11_FC1_OUT))   return false;
+    if (!loadDense16(g_li11.fc0_w, g_li11.fc0_b, L1,  LI11_FC0_TOTAL)) return false;
+    if (!loadDense16(g_li11.fc1_w, g_li11.fc1_b, 64,  LI11_FC1_OUT))   return false;
     if (!loadDense16(g_li11.fc2_w, g_li11.fc2_b, LI11_FC1_OUT, MATERIAL_BUCKETS)) return false;
 
     // threats — bloco opcional, mesmo padrão do NapK9 antigo (ausente → hasThreats=false).
@@ -2219,23 +2212,26 @@ static void li11PlyResolve(const Board& board, int b_w, int b_b, int32_t* accWou
 //   exatamente o caso aqui: in=uint8 (concat pareado), w=int8). nIn precisa de ser múltiplo
 //   de 32 para o caminho vetorial; sobra fica no loop escalar (fc0: nIn=L1, sempre par/
 //   múltiplo de 32 na prática -- 512, 768, 1024... ; fallback escalar cobre qualquer caso).
-static inline void li11Dense(const int8_t* w, const int32_t* b, const uint8_t* in,
+// 🦅 versão int16 (substitui a antiga int8+_mm256_maddubs_epi16 -- essa assumia pesos
+// int8, mas fc0_w/fc1_w/fc2_w são agora todos int16_t, sem clamp; ver comentário junto à
+// declaração de Li11Network). Entrada `in` continua uint8 [0,127] (vem do concat
+// pares-ativados); zero-extend p/ int16 e usa _mm256_madd_epi16 (int16×int16→int32, em
+// pares já somados) em vez de _mm256_maddubs_epi16 (que é especificamente uint8×int8).
+static inline void li11Dense(const int16_t* w, const int32_t* b, const uint8_t* in,
                              int nIn, int nOut, int32_t* out)
 {
     for (int o = 0; o < nOut; ++o) {
-        const int8_t* row = &w[(size_t)o * nIn];
+        const int16_t* row = &w[(size_t)o * nIn];
         int64_t sum = b[o];
         int i = 0;
 #if defined(__AVX2__)
         __m256i sum_v = _mm256_setzero_si256();
-        for (; i <= nIn - 32; i += 32) {
-            __m256i in_v = _mm256_loadu_si256((const __m256i*)&in[i]);
-            __m256i w_v  = _mm256_loadu_si256((const __m256i*)&row[i]);
-            __m256i madd = _mm256_maddubs_epi16(in_v, w_v);
-            __m256i lo = _mm256_cvtepi16_epi32(_mm256_castsi256_si128(madd));
-            __m256i hi = _mm256_cvtepi16_epi32(_mm256_extracti128_si256(madd, 1));
-            sum_v = _mm256_add_epi32(sum_v, lo);
-            sum_v = _mm256_add_epi32(sum_v, hi);
+        for (; i <= nIn - 16; i += 16) {
+            __m128i in_u8 = _mm_loadu_si128((const __m128i*)&in[i]);
+            __m256i in_v  = _mm256_cvtepu8_epi16(in_u8);
+            __m256i w_v   = _mm256_loadu_si256((const __m256i*)&row[i]);
+            __m256i madd  = _mm256_madd_epi16(in_v, w_v);
+            sum_v = _mm256_add_epi32(sum_v, madd);
         }
         int32_t buf[8]; _mm256_storeu_si256((__m256i*)buf, sum_v);
         sum += buf[0]+buf[1]+buf[2]+buf[3]+buf[4]+buf[5]+buf[6]+buf[7];
@@ -2333,7 +2329,7 @@ static int evaluateLI11Impl(const Board& board)
         const float biasDequantFc1 = 1.0f / g_li11.qbFc;
         const float wDequantFc1 = 1.0f / g_li11.qbFc;
         for (int o = 0; o < LI11_FC1_OUT; ++o) {
-            const int8_t* w = &g_li11.fc1_w[(size_t)o * 64];
+            const int16_t* w = &g_li11.fc1_w[(size_t)o * 64];
             float dot = 0.0f;
             for (int i = 0; i < 64; ++i) dot += (float)w[i] * concat64[i];
             fc1_out[o] = std::clamp((float)g_li11.fc1_b[o] * biasDequantFc1 + dot * wDequantFc1, 0.0f, 1.0f);
