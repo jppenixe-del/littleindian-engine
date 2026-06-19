@@ -284,7 +284,14 @@ static int contHistScore(int ply, PieceType curPiece, int curTo) {
 // Non-overlapping bands: TT > capturas boas (MVV-LVA) > killers > history
 // > capturas más (SEE < 0). Capturas boas em [80000, 197500], sempre acima
 // de killers/history e abaixo do lance da TT.
-static int moveScore(const Board& board, Move m, Move ttMove, const int killers[2], int ply) {
+// Bónus de xeque na ordenação de quietos: gap vs SF/Reckless — um lance quieto que dá
+// xeque (e não perde material na troca) recebe um bónus na ordenação, distinto da
+// extensão de xeque que já temos na busca (essa só afeta profundidade, não ordem).
+// checkSquares[pt] = conjunto de casas-destino a partir das quais uma peça do tipo `pt`
+// (da cor de quem vai jogar) dá xeque direto ao rei adversário — precalculado uma vez
+// por nó, reaproveitado em todos os lances (mesmo padrão do check_squares() do SF).
+static int moveScore(const Board& board, Move m, Move ttMove, const int killers[2], int ply,
+                      const Bitboard checkSquares[6]) {
     if (m.data == ttMove.data) return 1000000;
     if (m.isCapture()) {
         PieceType attacker = board.pieceOn(m.from());
@@ -301,7 +308,11 @@ static int moveScore(const Board& board, Move m, Move ttMove, const int killers[
     if (m.data == killers[1]) return 17000;
     int score = gHistory[int(board.sideToMove())][m.from()][m.to()]
               + contHistScore(ply, board.pieceOn(m.from()), m.to());
-    return std::min(score, 16500);  // mantém-se sempre abaixo dos killers
+    score = std::min(score, 16500);  // mantém-se sempre abaixo dos killers
+    PieceType movedPt = board.pieceOn(m.from());
+    if (movedPt != PieceType::KING && checkSquares[int(movedPt)].test(m.to()) && seeGE(board, m, 0))
+        score += 8000;
+    return score;
 }
 
 struct SortedMoves {
@@ -313,9 +324,21 @@ struct SortedMoves {
         MoveList list;
         generateMoves(const_cast<Board&>(board), list);
         count = list.count;
+        Bitboard checkSquares[6];
+        {
+            Color us = board.sideToMove();
+            Square eks = board.kingSq(~us);
+            Bitboard occ = board.allOcc;
+            checkSquares[int(PieceType::PAWN)]   = attacks::pawnAttackSq(~us, eks);
+            checkSquares[int(PieceType::KNIGHT)] = attacks::knightAttacks(eks);
+            checkSquares[int(PieceType::BISHOP)] = attacks::bishopAttacks(eks, occ);
+            checkSquares[int(PieceType::ROOK)]   = attacks::rookAttacks(eks, occ);
+            checkSquares[int(PieceType::QUEEN)]  = checkSquares[int(PieceType::BISHOP)] | checkSquares[int(PieceType::ROOK)];
+            checkSquares[int(PieceType::KING)]   = Bitboard();
+        }
         for (int i = 0; i < count; ++i) {
             moves[i]  = list.moves[i];
-            scores[i] = moveScore(board, list.moves[i], ttMove, killers, ply);
+            scores[i] = moveScore(board, list.moves[i], ttMove, killers, ply, checkSquares);
         }
     }
 
