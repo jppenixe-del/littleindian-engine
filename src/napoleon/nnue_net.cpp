@@ -2309,18 +2309,21 @@ static int evaluateLI11Impl(const Board& board)
     //  bias já dequantizado à parte. Ver li11Dense: out[o] = b[o] + dot, por isso isto separa
     //  os dois termos para lhes dar escalas diferentes, exatamente como o l1 antigo faz.)
 
-    // 3) duas ativações nos 32 reais, concatenadas (64). 🦅 FIX: sqrrelu() do bullet é
-    //   relu(x)² SEM limite superior (confirmado lendo crates/compiler/.../dfo.rs:
-    //   `let relu = ReLU.forward(input)?; relu * relu` — nada de clamp a 1 antes do
-    //   quadrado). Tinha implementado clamp(x,0,1)² (isso é o screlu() da arquitetura
-    //   ANTIGA, não o sqrrelu() que o treino da LI11 usa) — causava um enviesamento
-    //   crescente nunca convergia (cortava o termo quadrático onde o treino não cortava).
-    //   crelu() confirmado SIM com clamp a 1 (ReLU.forward(x).min(1)) — essa parte estava certa.
+    // 3) duas ativações nos 32 reais, concatenadas (64). 🦅 FIX #2 (reverte o FIX anterior,
+    //   que tinha a direção errada): o termo ao quadrado tem de usar screlu() do bullet
+    //   (= clamp(x,0,1)², clip ANTES do quadrado) -- é o que corresponde à SqrClippedReLU
+    //   REAL do SF (src/nnue/layers/sqr_clipped_relu.h: `std::min(127, x*x)` em unidades
+    //   quantizadas, matematicamente igual a clamp(x,0,1)² para x>=0 -- min(1,x²) e
+    //   clamp(x,0,1)² dão o mesmo resultado nesse domínio). sqrrelu() do bullet (relu(x)²,
+    //   SEM limite) é um op DIFERENTE -- confirmei a fonte do bullet corretamente da vez
+    //   anterior, mas mapeei o nome errado para a arquitetura do SF que estava a imitar.
+    //   Suspeito principal da divergência crescente no bucket 7 (termo sem limite cresce
+    //   sem controlo com o treino) -- persistia mesmo com dados bem balanceados.
     alignas(32) float concat64[64];
     for (int i = 0; i < LI11_FC0_REAL; ++i) {
-        float r = std::max(fc0_out[i], 0.0f);
-        concat64[i] = r * r;                                   // sqrrelu: relu(x)², SEM clamp
-        concat64[LI11_FC0_REAL + i] = std::min(r, 1.0f);        // crelu: clamp(x,0,1)
+        float c = std::clamp(fc0_out[i], 0.0f, 1.0f);
+        concat64[i] = c * c;                                   // screlu: clamp(x,0,1)²
+        concat64[LI11_FC0_REAL + i] = c;                        // crelu: clamp(x,0,1)
     }
 
     // 4) FC1: 64 → 32, float, cortada simples

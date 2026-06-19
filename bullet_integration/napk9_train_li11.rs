@@ -113,8 +113,16 @@ fn main() {
             let skip     = fc0_out.slice_rows(FC0_REAL, FC0_TOTAL);       // 1 largura, sem ativação
             let real_out = fc0_out.slice_rows(0, FC0_REAL);               // 32 largura
 
-            // 3) dupla ativação nos 32 reais: ao quadrado-cortada + cortada simples, concatenadas
-            let sqr_path = real_out.sqrrelu();
+            // 3) dupla ativação nos 32 reais: ao quadrado-CORTADA + cortada simples, concatenadas.
+            // 🦅 FIX: usar screlu() (= clamp(x,0,1)², a SqrClippedReLU real do SF, confirmada em
+            // src/nnue/layers/sqr_clipped_relu.h: std::min(127, x²) em unidades quantizadas — o
+            // MESMO que clamp(x,0,1)² para x>=0) -- NÃO sqrrelu() (= relu(x)², sem limite superior,
+            // é a SqrReLU do bullet, um op diferente). Tinha "corrigido" isto na direção errada
+            // antes (confirmei sqrrelu()==relu(x)² na fonte do bullet, mas mapeei o nome errado
+            // para a arquitetura do SF -- o termo sem limite é o suspeito mais provável para a
+            // divergência crescente no bucket 7/material completo, que persiste mesmo com dados
+            // bem balanceados (ver memória do dia).
+            let sqr_path = real_out.screlu();
             let lin_path = real_out.crelu();
             let concat64 = sqr_path.concat(lin_path);  // largura 64
 
