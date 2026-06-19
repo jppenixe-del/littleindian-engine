@@ -604,8 +604,12 @@ static int search(Board& board, int depth, int alpha, int beta,
 
     // Empate por repetição ou regra dos 50 lances — antes de tudo, inclusive
     // da TT (uma posição repetida não deve confiar num score de outro caminho).
+    // Pequeno jitter (±1cp pela paridade da contagem de nós) em vez de 0 fixo: gap vs
+    // SF (value_draw) — evita que a busca fique "cega" à ordem de evitar/buscar repetição
+    // quando todas as alternativas dão exatamente 0 (essencialmente gratuito, sem custo
+    // de Elo mensurável, só desempata).
     if (!root && (board.halfmoveClock() >= 100 || board.isRepetition()))
-        return 0;
+        return 1 - (int)(info.nodes & 2);
 
     // Mate distance pruning
     alpha = mateAlpha(alpha, ply);
