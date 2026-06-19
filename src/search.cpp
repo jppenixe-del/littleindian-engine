@@ -110,6 +110,48 @@ static void updateCorrHist(const Board& board, int rawEval, int bestScore) {
     if (e < -limit) e = -limit;
 }
 
+// ─── Correction History (não-peão, por cor) ────────────────────────────────
+// Mesma ideia do pawnCorrHist, mas indexada pelo material NÃO-PEÃO de cada
+// lado (cavalos/bispos/torres/damas/rei) — a eval erra de forma sistemática
+// também por desequilíbrios materiais (ex.: 2 menores vs torre), não só por
+// estrutura de peões. SF e Reckless têm AMBOS este 2º bucket (não tínhamos —
+// já estava nomeado no nosso INTEGRACAO_BLOCOS.md, nunca implementado).
+// Duas tabelas (uma por cor do material-chave), cada indexada também pela
+// perspetiva (quem tem a vez) — a correção final soma as duas.
+static int gNonPawnCorrHist[2][2][CORR_HIST_SIZE];  // [perspetiva][cor do material][idx]
+
+static uint64_t nonPawnKey(const Board& board, Color c) {
+    uint64_t key = 0;
+    for (PieceType pt : {PieceType::KNIGHT, PieceType::BISHOP, PieceType::ROOK, PieceType::QUEEN, PieceType::KING}) {
+        Bitboard bb = board.pieces(c, pt);
+        while (bb.any()) key ^= zobrist::piece(c, pt, bb.poplsb().value());
+    }
+    return key;
+}
+
+static int nonPawnCorrTerm(const Board& board) {
+    int stm = int(board.sideToMove());
+    int idxW = (int)(nonPawnKey(board, Color::WHITE) % CORR_HIST_SIZE);
+    int idxB = (int)(nonPawnKey(board, Color::BLACK) % CORR_HIST_SIZE);
+    return (gNonPawnCorrHist[stm][0][idxW] + gNonPawnCorrHist[stm][1][idxB]) / (2 * CORR_HIST_GRAIN);
+}
+
+static void updateNonPawnCorrHist(const Board& board, int rawEval, int bestScore) {
+    int stm = int(board.sideToMove());
+    int diff = (bestScore - rawEval) * CORR_HIST_GRAIN;
+    int limit = CORR_HIST_MAX * CORR_HIST_GRAIN;
+    int idxW = (int)(nonPawnKey(board, Color::WHITE) % CORR_HIST_SIZE);
+    int& eW = gNonPawnCorrHist[stm][0][idxW];
+    eW += (diff - eW) / 32;
+    if (eW > limit) eW = limit;
+    if (eW < -limit) eW = -limit;
+    int idxB = (int)(nonPawnKey(board, Color::BLACK) % CORR_HIST_SIZE);
+    int& eB = gNonPawnCorrHist[stm][1][idxB];
+    eB += (diff - eB) / 32;
+    if (eB > limit) eB = limit;
+    if (eB < -limit) eB = -limit;
+}
+
 // ─── Move ordering ──────────────────────────────────────────────────────
 static const int kPieceValue[6] = { 100, 325, 325, 500, 975, 20000 };
 static int DELTA_MARGIN = 352;  // Coda QS_DELTA_MARGIN (OUTPUT_SCALE_CP=400 now, no 408/400 rescale needed)
@@ -567,7 +609,13 @@ static int search(Board& board, int depth, int alpha, int beta,
     // mais barato. Um só cálculo por nó, partilhado por todas as podas.
     int rawEval = (ttHit && tte->eval != 0) ? tte->eval
                 : staticEval(board) + gOptimism[int(board.sideToMove())];
-    int eval    = rawEval + pawnCorrTerm(board);
+    int corrTerm = pawnCorrTerm(board) + nonPawnCorrTerm(board);
+    int eval    = rawEval + corrTerm;
+    // |corrTerm| como sinal de confiança: quando a correção teve de ajustar muito a eval,
+    // a eval estática é menos fiável aqui — alarga as margens de poda (RFP/futility/SEE)
+    // proporcionalmente. Mesma ideia usada pelo SF/Reckless (correction_value.abs()/N em
+    // várias fórmulas); o valor já estava calculado, só faltava ser lido por outros sítios.
+    int corrConfDiv = std::clamp(std::abs(corrTerm), 0, CORR_HIST_MAX);
 
     // Razoring: eval estática muito abaixo de alfa, mesmo com várias
     // jogadas de margem — cai direto em qsearch (ordem de consenso:
@@ -581,7 +629,7 @@ static int search(Board& board, int depth, int alpha, int beta,
     // poucos plies da folha — o adversário não vai deixar a posição chegar
     // aqui, corta sem gerar lances.
     if (!root && !pvNode && !inCheck && depth <= RFP_MAX_DEPTH) {
-        int margin = RFP_MARGIN * depth;
+        int margin = RFP_MARGIN * depth + corrConfDiv / 4;
         if (eval - margin >= beta)
             return eval - margin;
     }
@@ -711,7 +759,7 @@ static int search(Board& board, int depth, int alpha, int beta,
                 ++quietTried;
                 continue;
             }
-            if (depth <= FUTILITY_MAX_DEPTH && eval + FUTILITY_BASE + FUTILITY_MARGIN * depth <= alpha) {
+            if (depth <= FUTILITY_MAX_DEPTH && eval + FUTILITY_BASE + FUTILITY_MARGIN * depth + corrConfDiv / 4 <= alpha) {
                 ++quietTried;
                 continue;
             }
@@ -730,7 +778,7 @@ static int search(Board& board, int depth, int alpha, int beta,
         // profundidade — não vale a pena testar.
         if (m.isCapture() && !root && !pvNode && !inCheck && legalCnt >= 1
             && depth <= SEE_PRUNE_MAX_DEPTH
-            && !seeGE(board, m, -SEE_PRUNE_MARGIN * depth)) {
+            && !seeGE(board, m, -SEE_PRUNE_MARGIN * depth - corrConfDiv / 8)) {
             continue;
         }
 
@@ -882,8 +930,10 @@ static int search(Board& board, int depth, int alpha, int beta,
 
     // rawEval já calculado antes do ciclo de lances (mesma posição: o
     // tabuleiro fica sempre restaurado após cada makeMove/unmakeMove).
-    if (!inCheck && !isMate(bestScore))
+    if (!inCheck && !isMate(bestScore)) {
         updateCorrHist(board, rawEval, bestScore);
+        updateNonPawnCorrHist(board, rawEval, bestScore);
+    }
 
     gTT.store(board.hash, bestScore, rawEval, bestMove, depth, bound);
     return bestScore;
