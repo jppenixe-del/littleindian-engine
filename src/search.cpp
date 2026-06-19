@@ -763,6 +763,12 @@ static int search(Board& board, int depth, int alpha, int beta,
     if (!root && !pvNode && !inCheck && depth >= PROBCUT_MIN_DEPTH
         && beta < MATE_SCORE - 512) {
         int probCutBeta = beta + PROBCUT_MARGIN;
+        // ProbCut "barato": se a TT já tem um bound inferior >= probCutBeta, corta sem
+        // sequer gerar capturas — gap vs SF (mesma ideia, um corte extra antes do ciclo
+        // de lances, de borla porque a TT já estava carregada). Reaproveita ttHit/tte já
+        // lidos no topo da função.
+        if (ttHit && tte->depth >= depth && tte->bound() == Bound::LOWER && ttScore >= probCutBeta)
+            return ttScore;
         MoveList caps;
         generateCaptures(board, caps);
         for (int i = 0; i < caps.count; ++i) {
