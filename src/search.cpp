@@ -543,6 +543,15 @@ static int PROBCUT_MARGIN    = 220;  // ~ordem de SEE_PRUNE_MARGIN
 // ─── Singular Extensions ────────────────────────────────────────────────
 static int SE_MIN_DEPTH = 6;
 static int SE_MARGIN    = 64;
+// Gap vs SF/Reckless: o nosso singularExt era binário (0 ou 1). Ambos os motores de
+// referência graduam por quanto a busca de verificação ficou abaixo de singularBeta —
+// mais confiança no lance único, mais se aprofunda (até 3). Constantes próprias, nascem
+// neutras. SÓ a direção "aprofunda mais" foi implementada (não a extensão negativa que
+// os dois também têm) — mesmo motivo do hindsight depth adjustment: não tinha confiança
+// total no sinal/condição exata de quando reduzir, e reduzir errado é mais arriscado do
+// que aprofundar de mais (pior caso aqui é só nps perdido).
+static int SE_DOUBLE_MARGIN = 16;
+static int SE_TRIPLE_MARGIN = 80;
 
 // ─── Late Move Pruning ───────────────────────────────────────────────────
 // Magnitudes informadas pelo Coda (engine de referência mais próximo,
@@ -849,9 +858,20 @@ static int search(Board& board, int depth, int alpha, int beta,
             int singularDepth = (depth - 1) / 2;
             int sScore = search(board, singularDepth, singularBeta - 1, singularBeta,
                                  ply, false, info, prevNull, m);
-            if (!info.stopped && sScore < singularBeta)
-                singularExt = 1;
             if (info.stopped) return 0;
+            if (sScore < singularBeta) {
+                // Graduação: quanto mais a verificação ficou abaixo de singularBeta, mais
+                // confiança de que o lance da TT é mesmo o único bom — aprofunda mais.
+                singularExt = 1;
+                if (sScore < singularBeta - SE_DOUBLE_MARGIN) ++singularExt;
+                if (sScore < singularBeta - SE_TRIPLE_MARGIN) ++singularExt;
+            } else if (sScore >= beta && std::abs(sScore) < MATE_SCORE - 512) {
+                // Multi-cut: a verificação exclui o lance da TT e AINDA ASSIM bate a beta
+                // exterior — outro lance qualquer já corta aqui, não vale a pena continuar
+                // a testar lances neste nó. Gap vs SF/Reckless (não tínhamos nenhum uso do
+                // resultado da verificação para além de decidir estender ou não).
+                return sScore;
+            }
         }
 
         PieceType capturedVictim = m.isCapture()
@@ -1028,6 +1048,8 @@ static const TunableParam gTunables[] = {
     { "ProbcutMargin",     &PROBCUT_MARGIN,      50,   500  },
     { "SeMinDepth",        &SE_MIN_DEPTH,        3,    14   },
     { "SeMargin",          &SE_MARGIN,           10,   250  },
+    { "SeDoubleMargin",    &SE_DOUBLE_MARGIN,    4,    60   },
+    { "SeTripleMargin",    &SE_TRIPLE_MARGIN,    20,   200  },
     { "LmpMaxDepth",       &LMP_MAX_DEPTH,       2,    16   },
     { "LmpBase",           &LMP_BASE,            1,    20   },
     { "LmpMult",           &LMP_MULT,            1,    8    },
