@@ -1963,7 +1963,11 @@ struct Li11Network
     std::vector<int32_t> psqt;                  // [TOTAL_FEATURES*MATERIAL_BUCKETS]
     std::vector<int8_t>  fc0_w; std::vector<int32_t> fc0_b;   // [33*L1] , [33]   (row-major [out][in])
     std::vector<int8_t>  fc1_w; std::vector<int32_t> fc1_b;   // [32*64] , [32]
-    std::vector<int8_t>  fc2_w; std::vector<int32_t> fc2_b;   // [8*32]  , [8]
+    // 🦅 FIX: fc2_w quantizado a qbFc2=4096 (não 64 como fc0/fc1) -- valores reais chegam a
+    // ±8000+, NÃO cabem em int8 (-128..127). Estava a usar o mesmo loadDense (clamp a ±127)
+    // que fc0/fc1, saturando quase TODOS os pesos do FC2 aos extremos -- bug real apanhado
+    // por training/calibra_li11_fc.py (diff de até 22x entre o float puro e o C++ dequant).
+    std::vector<int16_t> fc2_w; std::vector<int32_t> fc2_b;   // [8*32]  , [8]
     bool hasThreats = false;
     bool fullThreats = false;
     std::vector<int16_t> threatWeight;   // [THREAT_FEATURES_FULL*L1] ou [640*L1]
@@ -2028,9 +2032,19 @@ static bool loadLI11(const std::vector<uint8_t>& buf)
         b.resize(nOut); lebI32(bp, cb, b.data(), nOut);
         return true;
     };
+    // 🦅 FC2 usa escala 4096 (qbFc²), valores não cabem em int8 -- versão sem o clamp a
+    // ±127, guarda em int16_t (ver comentário junto à declaração de fc2_w).
+    auto loadDense16 = [&](std::vector<int16_t>& w, std::vector<int32_t>& b, size_t nIn, size_t nOut) -> bool {
+        uint32_t cw; const uint8_t* wp = readChunk(buf, pos, cw); if (!wp) return false;
+        w.assign(nIn * nOut + 32, 0);
+        lebI16(wp, cw, w.data(), nIn * nOut);
+        uint32_t cb; const uint8_t* bp = readChunk(buf, pos, cb); if (!bp) return false;
+        b.resize(nOut); lebI32(bp, cb, b.data(), nOut);
+        return true;
+    };
     if (!loadDense(g_li11.fc0_w, g_li11.fc0_b, L1,  LI11_FC0_TOTAL)) return false;
     if (!loadDense(g_li11.fc1_w, g_li11.fc1_b, 64,  LI11_FC1_OUT))   return false;
-    if (!loadDense(g_li11.fc2_w, g_li11.fc2_b, LI11_FC1_OUT, MATERIAL_BUCKETS)) return false;
+    if (!loadDense16(g_li11.fc2_w, g_li11.fc2_b, LI11_FC1_OUT, MATERIAL_BUCKETS)) return false;
 
     // threats — bloco opcional, mesmo padrão do NapK9 antigo (ausente → hasThreats=false).
     {
@@ -2332,7 +2346,7 @@ static int evaluateLI11Impl(const Board& board)
         const float biasDequantFc2 = 1.0f / g_li11.qbFc2;
         const float wDequantFc2 = 1.0f / g_li11.qbFc2;  // fc2w TAMBÉM quantizado a qbFc2 (igual ao bias)
         for (int o = 0; o < MATERIAL_BUCKETS; ++o) {
-            const int8_t* w = &g_li11.fc2_w[(size_t)o * LI11_FC1_OUT];
+            const int16_t* w = &g_li11.fc2_w[(size_t)o * LI11_FC1_OUT];
             float dot = 0.0f;
             for (int i = 0; i < LI11_FC1_OUT; ++i) dot += (float)w[i] * fc1_out[i];
             fc2_out[o] = (float)g_li11.fc2_b[o] * biasDequantFc2 + dot * wDequantFc2;
@@ -2350,6 +2364,28 @@ static int evaluateLI11Impl(const Board& board)
                      fc0_out[0],fc0_out[1],fc0_out[2],fc0_out[3], fc0_out[LI11_FC0_REAL]);
         std::fprintf(stderr, "fc1_out[0..4]=%.4f,%.4f,%.4f,%.4f\n", fc1_out[0],fc1_out[1],fc1_out[2],fc1_out[3]);
         std::fprintf(stderr, "fc2_out[bucket=%d]=%.4f  out(fc2+skip)=%.4f\n", bucket, fc2_out[bucket], out);
+        // 🦅 dump completo p/ harness de calibração Python (training/calibra_li11_fc.py):
+        // concat[] (entrada do FC0, uint8 [0,127]) e fc0_raw[] (int32, ANTES do dequant).
+        const char* dumpPath = getenv("LI11_DEBUG_DUMP");
+        if (dumpPath) {
+            std::FILE* f = std::fopen(dumpPath, "w");
+            if (f) {
+                std::fprintf(f, "L1=%d bucket=%d qa=%.1f qbFc=%.1f qbFc2=%.1f\n",
+                             L1, bucket, g_li11.qa, g_li11.qbFc, g_li11.qbFc2);
+                std::fprintf(f, "concat=");
+                for (int i = 0; i < L1; ++i) std::fprintf(f, "%d,", concat[i]);
+                std::fprintf(f, "\nfc0_raw=");
+                for (int i = 0; i < LI11_FC0_TOTAL; ++i) std::fprintf(f, "%d,", fc0_raw[i]);
+                std::fprintf(f, "\nfc0_out=");
+                for (int i = 0; i < LI11_FC0_TOTAL; ++i) std::fprintf(f, "%.8f,", fc0_out[i]);
+                std::fprintf(f, "\nfc1_out=");
+                for (int i = 0; i < LI11_FC1_OUT; ++i) std::fprintf(f, "%.8f,", fc1_out[i]);
+                std::fprintf(f, "\nfc2_out=");
+                for (int i = 0; i < MATERIAL_BUCKETS; ++i) std::fprintf(f, "%.8f,", fc2_out[i]);
+                std::fprintf(f, "\nfinal_out=%.8f\n", out);
+                std::fclose(f);
+            }
+        }
     }
 
     float psqtBias = 0.0f;
