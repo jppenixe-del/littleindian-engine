@@ -1121,6 +1121,13 @@ static void searchBody(Board& board, const Limits& limits, bool isMain, uint64_t
     bool haveAvgScore = false;
     int prevScore = 0;
     bool havePrevScore = false;
+    // Falling-eval time extension: guarda o score da iteração ANTERIOR (não confundir com
+    // prevScore, que já passa a ser o score DESTA iteração mal ela acaba — serve só p/ as
+    // janelas de aspiração da iteração seguinte). Gap vs SF/Reckless: ambos usam a tendência
+    // do score entre iterações como um dos principais multiplicadores de TM; nós só tínhamos
+    // best-move-stability e node-fraction.
+    int lastIterScore = 0;
+    bool haveLastIterScore = false;
     // Best-move stability: nº de iterações consecutivas em que o melhor
     // lance não mudou — encolhe o tempo alocado quando a decisão já está
     // estável (ver soft time check abaixo). BM_STABILITY_* movidos p/
@@ -1282,7 +1289,20 @@ static void searchBody(Board& board, const Limits& limits, bool isMain, uint64_t
         }
         double nodeFraction = iterTotalNodes > 0 ? (double)bestMoveNodes / iterTotalNodes : 0.0;
         double nodeFactor = std::max(0.7, std::min(1.3, 1.5 - nodeFraction));
-        int64_t effectiveSoft = (int64_t)(info.softLimitMs * stabilityFactor * nodeFactor);
+        // Falling-eval: se o score piorou bastante desde a iteração anterior, a posição
+        // pode estar a degradar-se ou a busca a encontrar algo inesperado — vale a pena
+        // gastar mais tempo. Score melhor/igual → sem alteração (não encolhe tempo aqui,
+        // o nodeFactor/stability já tratam de "decisão clara"). Escala 0.1 por cada 50cp de
+        // queda, capado em ±0.3 — constante própria, nasce neutra.
+        double fallingEvalFactor = 1.0;
+        if (haveLastIterScore && !isMate(score) && !isMate(lastIterScore)) {
+            int drop = lastIterScore - score;  // >0 quando o score piorou
+            if (drop > 0)
+                fallingEvalFactor = std::min(1.3, 1.0 + 0.1 * (drop / 50.0));
+        }
+        lastIterScore = score;
+        haveLastIterScore = true;
+        int64_t effectiveSoft = (int64_t)(info.softLimitMs * stabilityFactor * nodeFactor * fallingEvalFactor);
         if (napoleon::wdlbrain::g_config.enabled)
             effectiveSoft = (int64_t)(effectiveSoft * napoleon::wdlbrain::timeFactor(board, score));
         if (!limits.infinite && effectiveSoft > 0
