@@ -200,13 +200,25 @@ void uci::loop() {
             std::printf("option name NapkIncremental type check default false\n");
             std::printf("option name MultiPV type spin default 1 min 1 max 8\n");
             std::printf("option name UseThreats type check default true\n");
+            std::printf("option name Move Overhead type spin default 10 min 0 max 5000\n");
             printTunableOptions();
             std::printf("uciok\n");
         } else if (cmd == "isready") {
             std::printf("readyok\n");
         } else if (cmd == "setoption") {
-            std::string name_tok, name, value_tok, value;
-            ss >> name_tok >> name >> value_tok >> value;
+            // Parsing robusto: "name"/"value" podem ter espaços (ex. "Move Overhead") —
+            // extrai do texto bruto da linha em vez de tokens isolados via stringstream
+            // (que só lê uma palavra de cada vez e cortava nomes/valores com espaço).
+            std::string name, value;
+            size_t namePos = line.find("name ");
+            size_t valuePos = line.find(" value ");
+            if (namePos != std::string::npos) {
+                size_t nameStart = namePos + 5;
+                size_t nameEnd = (valuePos != std::string::npos) ? valuePos : line.size();
+                name = line.substr(nameStart, nameEnd - nameStart);
+            }
+            if (valuePos != std::string::npos)
+                value = line.substr(valuePos + 7);
             if (name == "Hash") {
                 int mb = std::stoi(value);
                 gTT.resize(mb);
@@ -227,6 +239,8 @@ void uci::loop() {
                 setMultiPV(std::atoi(value.c_str()));
             } else if (name == "UseThreats") {
                 napoleon::nnue::setThreatsEnabled(value == "true");
+            } else if (name == "Move Overhead") {
+                gMoveOverheadMs = std::atoi(value.c_str());
             } else if (!setTunableParam(name, std::atoi(value.c_str()))) {
                 std::printf("info string unknown option %s\n", name.c_str());
             }

@@ -13,6 +13,8 @@
 #include <vector>
 #include <memory>
 
+int gMoveOverheadMs = 10;
+
 TT gTT;
 
 // ─── Lazy SMP ────────────────────────────────────────────────────────────
@@ -1108,6 +1110,7 @@ static void searchBody(Board& board, const Limits& limits, bool isMain, uint64_t
     } else if (limits.wtime > 0 || limits.btime > 0) {
         int myTime = (board.sideToMove() == Color::WHITE) ? limits.wtime : limits.btime;
         int myInc  = (board.sideToMove() == Color::WHITE) ? limits.winc  : limits.binc;
+        myTime = std::max(1, myTime - gMoveOverheadMs);
         int moves  = limits.movestogo > 0 ? limits.movestogo : 40;
         int base   = myTime / moves + myInc;
         info.softLimitMs = std::min(base, myTime / 2);

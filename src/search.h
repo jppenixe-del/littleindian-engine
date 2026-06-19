@@ -5,6 +5,11 @@
 #include <atomic>
 #include <string>
 
+// Margem de segurança subtraída ao tempo disponível antes de calcular os limites de
+// busca — cobre a latência de comunicação com a GUI/rede (gap: não existia nenhuma
+// opção UCI equivalente a "Move Overhead", presente em todos os motores de referência).
+extern int gMoveOverheadMs;
+
 // Search limits
 struct Limits {
     int  depth    = 64;
