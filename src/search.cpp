@@ -181,18 +181,20 @@ static thread_local int gOptimism[2] = {0, 0};
 // recebe bónus, lance que entra numa casa atacada (vindo de uma casa segura) recebe
 // malus. Versão mais simples e segura do que reindexar gHistory com bits de ameaça
 // (Reckless faz isso); aqui é só um termo aditivo, sem tocar nas tabelas existentes.
+// 🦅 SÓ peão/cavalo/rei — de propósito, não bispo/torre/dama. Essas três precisam de
+// magic bitboards COM a ocupação atual (lookup caro, repetido por peça) e mudam de
+// forma complicada com qualquer lance no tabuleiro (ataques descobertos) — não há
+// forma segura de as manter incremental sem um sistema novo e arriscado de rastreio
+// por peça deslizante. Peão/cavalo/rei são O(1) por peça, sem dependência de
+// ocupação (cavalo/rei são lookups fixos; peão é um único shift para TODOS os peões
+// duma vez) — o custo fica desprezável, à custa de não cobrir ameaças de peças
+// deslizantes nesta heurística de ordenação (continuam cobertas por SEE/MVV-LVA nas
+// capturas, só não entram no bónus/malus de "escapar de ameaça" dos quietos).
 static Bitboard computeSideAttacks(const Board& board, Color side) {
-    Bitboard occ = board.allOcc;
     Bitboard atk = (side == Color::WHITE) ? attacks::pawnAttacks<Color::WHITE>(board.pieces(side, PieceType::PAWN))
                                            : attacks::pawnAttacks<Color::BLACK>(board.pieces(side, PieceType::PAWN));
     Bitboard bb = board.pieces(side, PieceType::KNIGHT);
     while (bb.any()) atk |= attacks::knightAttacks(bb.poplsb());
-    bb = board.pieces(side, PieceType::BISHOP);
-    while (bb.any()) atk |= attacks::bishopAttacks(bb.poplsb(), occ);
-    bb = board.pieces(side, PieceType::ROOK);
-    while (bb.any()) atk |= attacks::rookAttacks(bb.poplsb(), occ);
-    bb = board.pieces(side, PieceType::QUEEN);
-    while (bb.any()) { Square qs = bb.poplsb(); atk |= attacks::bishopAttacks(qs, occ) | attacks::rookAttacks(qs, occ); }
     atk |= attacks::kingAttacks(board.kingSq(side));
     return atk;
 }
