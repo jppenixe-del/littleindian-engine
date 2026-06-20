@@ -61,6 +61,74 @@ static bool checkTime(SearchInfo& info) {
 // fallback material+threats de staticEval poder reutilizá-la sem reordenar o ficheiro.
 static Bitboard computeSideAttacks(const Board& board, Color side);
 
+// PSQTs clássicas de domínio público (Tomasz Michniewski, "Simplified Evaluation
+// Function", chessprogramming.org — referência educacional standard, não proprietárias
+// de nenhum motor específico). Só para o fallback de diagnóstico sem NNUE: sem isto, o
+// material+threats não distingue desenvolvimento/centro/segurança do rei, dando 0.00
+// para QUALQUER lance de abertura — exatamente o que causou "a2a3" como 1º lance.
+// Tabelas da perspetiva das BRANCAS (a8=0 .. h1=63); pretas leem espelhado (sq^56).
+static const int kPsqtPawn[64] = {
+      0,  0,  0,  0,  0,  0,  0,  0,
+     50, 50, 50, 50, 50, 50, 50, 50,
+     10, 10, 20, 30, 30, 20, 10, 10,
+      5,  5, 10, 25, 25, 10,  5,  5,
+      0,  0,  0, 20, 20,  0,  0,  0,
+      5, -5,-10,  0,  0,-10, -5,  5,
+      5, 10, 10,-20,-20, 10, 10,  5,
+      0,  0,  0,  0,  0,  0,  0,  0,
+};
+static const int kPsqtKnight[64] = {
+    -50,-40,-30,-30,-30,-30,-40,-50,
+    -40,-20,  0,  0,  0,  0,-20,-40,
+    -30,  0, 10, 15, 15, 10,  0,-30,
+    -30,  5, 15, 20, 20, 15,  5,-30,
+    -30,  0, 15, 20, 20, 15,  0,-30,
+    -30,  5, 10, 15, 15, 10,  5,-30,
+    -40,-20,  0,  5,  5,  0,-20,-40,
+    -50,-40,-30,-30,-30,-30,-40,-50,
+};
+static const int kPsqtBishop[64] = {
+    -20,-10,-10,-10,-10,-10,-10,-20,
+    -10,  0,  0,  0,  0,  0,  0,-10,
+    -10,  0,  5, 10, 10,  5,  0,-10,
+    -10,  5,  5, 10, 10,  5,  5,-10,
+    -10,  0, 10, 10, 10, 10,  0,-10,
+    -10, 10, 10, 10, 10, 10, 10,-10,
+    -10,  5,  0,  0,  0,  0,  5,-10,
+    -20,-10,-10,-10,-10,-10,-10,-20,
+};
+static const int kPsqtRook[64] = {
+      0,  0,  0,  0,  0,  0,  0,  0,
+      5, 10, 10, 10, 10, 10, 10,  5,
+     -5,  0,  0,  0,  0,  0,  0, -5,
+     -5,  0,  0,  0,  0,  0,  0, -5,
+     -5,  0,  0,  0,  0,  0,  0, -5,
+     -5,  0,  0,  0,  0,  0,  0, -5,
+     -5,  0,  0,  0,  0,  0,  0, -5,
+      0,  0,  0,  5,  5,  0,  0,  0,
+};
+static const int kPsqtQueen[64] = {
+    -20,-10,-10, -5, -5,-10,-10,-20,
+    -10,  0,  0,  0,  0,  0,  0,-10,
+    -10,  0,  5,  5,  5,  5,  0,-10,
+     -5,  0,  5,  5,  5,  5,  0, -5,
+      0,  0,  5,  5,  5,  5,  0, -5,
+    -10,  5,  5,  5,  5,  5,  0,-10,
+    -10,  0,  5,  0,  0,  0,  0,-10,
+    -20,-10,-10, -5, -5,-10,-10,-20,
+};
+static const int kPsqtKing[64] = {
+    -30,-40,-40,-50,-50,-40,-40,-30,
+    -30,-40,-40,-50,-50,-40,-40,-30,
+    -30,-40,-40,-50,-50,-40,-40,-30,
+    -30,-40,-40,-50,-50,-40,-40,-30,
+    -20,-30,-30,-40,-40,-30,-30,-20,
+    -10,-20,-20,-20,-20,-20,-20,-10,
+     20, 20,  0,  0,  0,  0, 20, 20,
+     20, 30, 10,  0,  0, 10, 30, 20,
+};
+static const int* const kPsqt[6] = { kPsqtPawn, kPsqtKnight, kPsqtBishop, kPsqtRook, kPsqtQueen, kPsqtKing };
+
 // ─── Eval ─────────────────────────────────────────────────────────────────
 static int staticEval(const Board& board) {
     int score;
@@ -77,6 +145,18 @@ static int staticEval(const Board& board) {
         for (int pt = 0; pt < 5; ++pt) {
             s += board.pieceBB[0][pt].popcount() * pv[pt];
             s -= board.pieceBB[1][pt].popcount() * pv[pt];
+        }
+        // PSQT clássico (desenvolvimento/centro/segurança do rei) — sem isto, material+
+        // threats dava 0.00 para QUALQUER lance de abertura (nenhuma capture/ameaça
+        // cedo no jogo), levando a lances arbitrários como a2a3 como "melhor" só por
+        // ordem de geração. Convenção do motor: sq=0 é a1 (rank1), a tabela está escrita
+        // com linha 0 = rank8 — por isso brancas leem sq^56 (inverte o rank), pretas
+        // leem sq diretamente (simetria especular completa).
+        for (int pt = 0; pt < 6; ++pt) {
+            Bitboard wp = board.pieceBB[0][pt];
+            while (wp.any()) s += kPsqt[pt][wp.poplsb().value() ^ 56];
+            Bitboard bp = board.pieceBB[1][pt];
+            while (bp.any()) s -= kPsqt[pt][bp.poplsb().value()];
         }
         Bitboard whiteAttacks = computeSideAttacks(board, Color::WHITE);
         Bitboard blackAttacks = computeSideAttacks(board, Color::BLACK);
