@@ -135,7 +135,12 @@ static int nonPawnCorrTerm(const Board& board) {
     int stm = int(board.sideToMove());
     int idxW = (int)(nonPawnKey(board, Color::WHITE) % CORR_HIST_SIZE);
     int idxB = (int)(nonPawnKey(board, Color::BLACK) % CORR_HIST_SIZE);
-    return (gNonPawnCorrHist[stm][0][idxW] + gNonPawnCorrHist[stm][1][idxB]) / (2 * CORR_HIST_GRAIN);
+    // 🦅 FIX: dividia por 2×GRAIN (média dos dois buckets de cor) — confirmado lendo o
+    // código real do SF e do Reckless que AMBOS SOMAM os dois buckets (branco+preto) e
+    // dividem só por UM grain, igual ao pawnCorrTerm. A nossa versão estava a sub-pesar
+    // o sinal não-pawn a metade do que devia relativamente ao pawn -- bug de escala, não
+    // de sinal, mas real e novo de hoje (a tabela foi adicionada hoje).
+    return (gNonPawnCorrHist[stm][0][idxW] + gNonPawnCorrHist[stm][1][idxB]) / CORR_HIST_GRAIN;
 }
 
 static void updateNonPawnCorrHist(const Board& board, int rawEval, int bestScore) {
