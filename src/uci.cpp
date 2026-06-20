@@ -241,7 +241,9 @@ void uci::loop() {
             } else if (name == "Threads") {
                 setThreads(std::stoi(value));
             } else if (name == "EvalFile") {
-                if (value != "<embedded>" && !value.empty()) {
+                if (value == "none") {
+                    napoleon::nnue::unload();  // 🦅 fallback material puro, p/ isolar NNUE vs busca em testes
+                } else if (value != "<embedded>" && !value.empty()) {
                     if (!napoleon::nnue::load(value))
                         std::printf("info string Failed to load net: %s\n", value.c_str());
                 }
