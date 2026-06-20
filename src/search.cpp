@@ -129,6 +129,116 @@ static const int kPsqtKing[64] = {
 };
 static const int* const kPsqt[6] = { kPsqtPawn, kPsqtKnight, kPsqtBishop, kPsqtRook, kPsqtQueen, kPsqtKing };
 
+// HCE de diagnóstico, fase 2: termos de threats inspirados na estrutura conceptual do
+// threats() do Stockfish (src/evaluate.cpp, era clássica sf_12..sf_16 -- ideias/lista de
+// termos estudados na fonte real, reimplementados aqui do zero, pesos próprios calibrados
+// via Texel tuning, não copiados do SF). Subconjunto dos 11 termos reais: os 7 de maior
+// impacto (ThreatByMinor, ThreatByRook, Hanging, ThreatBySafePawn, RestrictedPiece,
+// WeakQueenProtection, ThreatByKing); ficam de fora por agora KnightOnQueen, SliderOnQueen,
+// ThreatByPawnPush, WeakQueen (mais raros/marginais).
+struct AttackInfo {
+    Bitboard byPawn, byKnight, byBishop, byRook, byQueen, byKing, all, all2;
+};
+static AttackInfo computeAttackInfo(const Board& board, Color side) {
+    AttackInfo info;
+    Bitboard occ = board.allOcc;
+    info.byPawn = (side == Color::WHITE)
+        ? attacks::pawnAttacks<Color::WHITE>(board.pieces(side, PieceType::PAWN))
+        : attacks::pawnAttacks<Color::BLACK>(board.pieces(side, PieceType::PAWN));
+    info.byKnight = Bitboard(0ULL);
+    Bitboard bb = board.pieces(side, PieceType::KNIGHT);
+    while (bb.any()) info.byKnight |= attacks::knightAttacks(bb.poplsb());
+    info.byBishop = Bitboard(0ULL);
+    bb = board.pieces(side, PieceType::BISHOP);
+    while (bb.any()) info.byBishop |= attacks::bishopAttacks(bb.poplsb(), occ);
+    info.byRook = Bitboard(0ULL);
+    bb = board.pieces(side, PieceType::ROOK);
+    while (bb.any()) info.byRook |= attacks::rookAttacks(bb.poplsb(), occ);
+    info.byQueen = Bitboard(0ULL);
+    bb = board.pieces(side, PieceType::QUEEN);
+    while (bb.any()) { Square qs = bb.poplsb(); info.byQueen |= attacks::bishopAttacks(qs, occ) | attacks::rookAttacks(qs, occ); }
+    info.byKing = attacks::kingAttacks(board.kingSq(side));
+    info.all = info.byPawn | info.byKnight | info.byBishop | info.byRook | info.byQueen | info.byKing;
+    // Aproximação de attackedBy2: une as interseções par-a-par entre categorias de peça.
+    // Não cobre 2 peões diferentes a atacar a mesma casa (within-category) -- imprecisão
+    // pequena e aceitável para um HCE de diagnóstico, não precisa de ser bit-exato ao SF.
+    Bitboard cats[6] = { info.byPawn, info.byKnight, info.byBishop, info.byRook, info.byQueen, info.byKing };
+    info.all2 = Bitboard(0ULL);
+    for (int i = 0; i < 6; ++i)
+        for (int j = i + 1; j < 6; ++j)
+            info.all2 |= (cats[i] & cats[j]);
+    return info;
+}
+// Pesos treináveis via texel_tuner (training/texel_tuner/), valores iniciais = 0 até à
+// primeira calibragem -- atualizar manualmente colando o output do tuner aqui.
+struct ThreatWeights {
+    int threatByMinor[6] = {0,0,0,0,0,0};   // indexado por PieceType da peça atacada
+    int threatByRook[6]  = {0,0,0,0,0,0};
+    int threatByKing      = 0;
+    int hanging           = 0;
+    int weakQueenProt     = 0;
+    int restrictedPiece   = 0;
+    int threatBySafePawn  = 0;
+};
+static const ThreatWeights kThreatW;
+// Conta os 7 termos para `side` atacando o adversário; devolve a soma já pesada (cp).
+static int computeThreatScore(const Board& board, Color side, const AttackInfo& us, const AttackInfo& them) {
+    Color enemy = ~side;
+    Bitboard enemyAll = Bitboard(0ULL);
+    for (int pt = 0; pt < 6; ++pt) enemyAll |= board.pieceBB[int(enemy)][pt];
+    Bitboard enemyPawns = board.pieceBB[int(enemy)][int(PieceType::PAWN)];
+    Bitboard nonPawnEnemiesReal = enemyAll & ~enemyPawns;
+
+    Bitboard stronglyProtected = them.byPawn | (them.all2 & ~us.all2);
+    Bitboard defended = nonPawnEnemiesReal & stronglyProtected;
+    Bitboard weak = enemyAll & ~stronglyProtected & us.all;
+
+    int score = 0;
+    // ThreatByMinor: minor ataca (defended|weak), soma por tipo de peça atacada.
+    Bitboard minorTargets = (defended | weak) & (us.byKnight | us.byBishop);
+    {
+        Bitboard bb = minorTargets;
+        while (bb.any()) {
+            Square sq = bb.poplsb();
+            PieceType pt = board.pieceOn(sq);
+            if (pt != PieceType::NONE) score += kThreatW.threatByMinor[int(pt)];
+        }
+    }
+    // ThreatByRook: rook ataca só `weak` (não defended).
+    {
+        Bitboard bb = weak & us.byRook;
+        while (bb.any()) {
+            Square sq = bb.poplsb();
+            PieceType pt = board.pieceOn(sq);
+            if (pt != PieceType::NONE) score += kThreatW.threatByRook[int(pt)];
+        }
+    }
+    // ThreatByKing: booleano, rei ataca pelo menos 1 peça weak.
+    if ((weak & us.byKing).any()) score += kThreatW.threatByKing;
+    // Hanging: weak adicionalmente totalmente indefeso OU não-peão atacado 2x por nós.
+    {
+        Bitboard hangBase = ~them.all | (nonPawnEnemiesReal & us.all2);
+        score += kThreatW.hanging * (weak & hangBase).popcount();
+    }
+    // WeakQueenProtection: entre as weak, quantas só a dama inimiga defende.
+    score += kThreatW.weakQueenProt * (weak & them.byQueen).popcount();
+    // RestrictedPiece: casas que o inimigo ocupa/defende, não fortemente protegidas, que
+    // nós também atacamos -- restringe a mobilidade das peças inimigas nessas casas.
+    {
+        Bitboard restricted = them.all & ~stronglyProtected & us.all;
+        score += kThreatW.restrictedPiece * restricted.popcount();
+    }
+    // ThreatBySafePawn: peões nossos em casas safe atacando peças inimigas não-peão.
+    {
+        Bitboard safe = ~them.all | us.all;
+        Bitboard safePawns = board.pieces(side, PieceType::PAWN) & safe;
+        Bitboard pawnAtk = (side == Color::WHITE) ? attacks::pawnAttacks<Color::WHITE>(safePawns)
+                                                   : attacks::pawnAttacks<Color::BLACK>(safePawns);
+        score += kThreatW.threatBySafePawn * (pawnAtk & nonPawnEnemiesReal).popcount();
+    }
+    return score;
+}
+
 // ─── Eval ─────────────────────────────────────────────────────────────────
 static int staticEval(const Board& board) {
     int score;
@@ -158,20 +268,10 @@ static int staticEval(const Board& board) {
             Bitboard bp = board.pieceBB[1][pt];
             while (bp.any()) s -= kPsqt[pt][bp.poplsb().value()];
         }
-        Bitboard whiteAttacks = computeSideAttacks(board, Color::WHITE);
-        Bitboard blackAttacks = computeSideAttacks(board, Color::BLACK);
-        for (int pt = 0; pt < 5; ++pt) {
-            Bitboard whitePieces = board.pieceBB[0][pt];
-            while (whitePieces.any()) {
-                int sq = whitePieces.poplsb().value();
-                if (blackAttacks.test(sq) && !whiteAttacks.test(sq)) s -= pv[pt] / 8;
-            }
-            Bitboard blackPieces = board.pieceBB[1][pt];
-            while (blackPieces.any()) {
-                int sq = blackPieces.poplsb().value();
-                if (whiteAttacks.test(sq) && !blackAttacks.test(sq)) s += pv[pt] / 8;
-            }
-        }
+        AttackInfo whiteAtk = computeAttackInfo(board, Color::WHITE);
+        AttackInfo blackAtk = computeAttackInfo(board, Color::BLACK);
+        s += computeThreatScore(board, Color::WHITE, whiteAtk, blackAtk);
+        s -= computeThreatScore(board, Color::BLACK, blackAtk, whiteAtk);
         score = board.sideToMove() == Color::WHITE ? s : -s;
     }
     // Escala pelo halfmove clock: aproxima a regra dos 50 lances — a eval
