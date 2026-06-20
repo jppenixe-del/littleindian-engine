@@ -798,7 +798,12 @@ static int search(Board& board, int depth, int alpha, int beta,
     //     (mesmo com pouca/nenhuma redução, a posição melhorou bastante — corta mais).
     // Constantes próprias (3 plies, 50cp), não copiadas das deles (escala diferente). Sem
     // "tt_pv" próprio na nossa TT -- uso !pvNode como aproximação razoável.
-    if (!root && !inCheck && ply >= 1) {
+    // 🦅 FIX (bug real, encontrado por revisão depois do SPRT negativo do bloco7): faltava
+    // o guard excludedMove.isNull(). A busca de verificação do singular extension chama
+    // search() na MESMA ply com excludedMove=m -- sem este guard, este bloco corria
+    // OUTRA VEZ nessa chamada extra, ajustando depth com base num sinal que não devia
+    // disparar ali (confirmado: Reckless tem !excluded em todos os guards equivalentes).
+    if (!root && !inCheck && excludedMove.isNull() && ply >= 1) {
         int pPly = std::min(ply, 127);
         int priorReduction = gReductionAtPly[pPly];
         int parentEval = gEvalAtPly[std::min(ply - 1, 127)];
@@ -818,7 +823,12 @@ static int search(Board& board, int depth, int alpha, int beta,
     // quietos do pai, só a profundidades baixas OU sem TT hit (evita reforçar repetido em
     // posições já bem exploradas — mesmo guard do Reckless). Constantes próprias (K e
     // clamp), não copiadas das deles (escala diferente).
-    if (!root && !inCheck && ply >= 1 && gMoveWasQuietAtPly[std::min(ply, 127)] && (depth < 6 || !ttHit)) {
+    // 🦅 FIX (mesmo motivo do bloco hindsight acima): falta excludedMove.isNull() —
+    // sem isto, a busca de verificação do singular extension ATUALIZAVA O HISTORY DO
+    // LANCE DO PAI EM DUPLICADO (uma vez na entrada normal do nó, outra na chamada de
+    // verificação excluída) -- corrompe ordenação em qualquer nó onde o singular
+    // extension dispare (depth>=6, comum). Confirmado: Reckless tem !excluded aqui.
+    if (!root && !inCheck && excludedMove.isNull() && ply >= 1 && gMoveWasQuietAtPly[std::min(ply, 127)] && (depth < 6 || !ttHit)) {
         int pPly = std::min(ply, 127);
         Move parentMove = gMoveAtPly[pPly];
         int parentEval = gEvalAtPly[std::min(ply - 1, 127)];
@@ -875,6 +885,12 @@ static int search(Board& board, int depth, int alpha, int beta,
         board.makeNullMove();
         evalPush(board, MoveDelta{}, ply);   // passa a vez: 0 peças mudam, bucket não muda
         gReductionAtPly[std::min(ply + 1, 127)] = 0;  // NMP não é LMR — não confundir no hindsight depth adjustment
+        // 🦅 FIX: gMoveWasQuietAtPly[ply+1] também tem de ser limpo — sem isto, o bloco
+        // de history por diferença de eval no nó filho lia o LANCE/flag-quieto de outro
+        // lance qualquer (de um irmão anterior no MESMO ply, lixo de outra parte da
+        // árvore), bombardeando o history desse lance ERRADO com um bónus/malus que não
+        // lhe pertence. NMP não tem lance real (passa a vez) — false desliga o bloco.
+        gMoveWasQuietAtPly[std::min(ply + 1, 127)] = false;
         int score = -search(board, depth - 1 - R, -beta, -beta + 1, ply + 1, false, info, true);
         evalPop(ply);
         board.unmakeNullMove();
@@ -941,6 +957,11 @@ static int search(Board& board, int depth, int alpha, int beta,
             int probCutDepth = depth - 4;
             if (!info.stopped && score >= probCutBeta && probCutDepth > 0) {
                 gReductionAtPly[std::min(ply + 1, 127)] = 0;  // ProbCut não é LMR
+                // 🦅 FIX: limpa explicitamente (mesmo motivo do NMP acima) -- o lance do
+                // ProbCut É uma captura (logo já seria "false" se os dados fossem frescos),
+                // mas este array a esta altura ainda tem o que sobrou doutro nó qualquer;
+                // não depender disso, definir explicitamente.
+                gMoveWasQuietAtPly[std::min(ply + 1, 127)] = false;
                 score = -search(board, probCutDepth, -probCutBeta, -probCutBeta + 1, ply + 1, false, info);
             }
             evalPop(ply);
@@ -1060,7 +1081,13 @@ static int search(Board& board, int depth, int alpha, int beta,
                 // exterior — outro lance qualquer já corta aqui, não vale a pena continuar
                 // a testar lances neste nó. Gap vs SF/Reckless (não tínhamos nenhum uso do
                 // resultado da verificação para além de decidir estender ou não).
-                return sScore;
+                // 🦅 FIX: devolvia sScore em bruto. O Reckless aproxima-o de beta (~40% do
+                // caminho) em vez de devolver o valor cheio — sScore vem duma busca a
+                // profundidade REDUZIDA (singularDepth), por isso é menos fiável que um
+                // valor normal desta profundidade; inflar o corte com o valor bruto
+                // propaga um score otimista de mais para o pai (janelas de aspiração,
+                // outras podas). Mistura para beta, não copia o valor exato deles.
+                return beta + (sScore - beta) * 6 / 10;
             } else if (ttScore >= beta) {
                 // Extensão negativa: confirmado no código real do Reckless (src/search.rs,
                 // bloco singular) — gate exato é `tt_score >= beta || cut_node`. Não temos
