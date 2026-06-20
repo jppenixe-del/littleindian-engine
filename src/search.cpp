@@ -161,7 +161,7 @@ static const Score kPsqtKing[64] = {
 };
 static const Score* const kPsqt[6] = { kPsqtPawn, kPsqtKnight, kPsqtBishop, kPsqtRook, kPsqtQueen, kPsqtKing };
 
-// HCE de diagnóstico, fase 2: termos de threats inspirados na estrutura conceptual do
+// HCE (sem rede NNUE), fase 2: termos de threats inspirados na estrutura conceptual do
 // threats() do Stockfish (src/evaluate.cpp, era clássica sf_12..sf_16 -- ideias/lista de
 // termos estudados na fonte real, reimplementados aqui do zero, pesos próprios calibrados
 // via Texel tuning, não copiados do SF). Subconjunto dos 11 termos reais: os 7 de maior
@@ -193,7 +193,7 @@ static AttackInfo computeAttackInfo(const Board& board, Color side) {
     info.all = info.byPawn | info.byKnight | info.byBishop | info.byRook | info.byQueen | info.byKing;
     // Aproximação de attackedBy2: une as interseções par-a-par entre categorias de peça.
     // Não cobre 2 peões diferentes a atacar a mesma casa (within-category) -- imprecisão
-    // pequena e aceitável para um HCE de diagnóstico, não precisa de ser bit-exato ao SF.
+    // pequena e aceitável aqui, não precisa de ser bit-exato ao SF.
     Bitboard cats[6] = { info.byPawn, info.byKnight, info.byBishop, info.byRook, info.byQueen, info.byKing };
     info.all2 = Bitboard(0ULL);
     for (int i = 0; i < 6; ++i)
@@ -211,6 +211,13 @@ struct ThreatWeights {
     Score weakQueenProt     = {1,1};
     Score restrictedPiece   = {2,2};
     Score threatBySafePawn  = {58,58};
+    // 🦅 Completam os 11 termos reais do threats() clássico do SF (sf_12..sf_16) -- os 4
+    // que faltavam (mais raros/marginais, mas o motor agora vai ao máximo, não fica a
+    // meio): ThreatByPawnPush, KnightOnQueen, SliderOnQueen, WeakQueen.
+    Score threatByPawnPush  = {0,0};
+    Score knightOnQueen     = {0,0};
+    Score sliderOnQueen     = {0,0};
+    Score weakQueen         = {0,0};
 };
 static const ThreatWeights kThreatW;
 
@@ -360,6 +367,45 @@ static Score computeMobilityScore(const Board& board, Color side, const AttackIn
     return score;
 }
 
+// WeakQueen: penaliza a NOSSA PRÓPRIA dama se está numa linha (reta ou diagonal) onde,
+// removendo a peça interposta mais próxima, um slider inimigo do tipo compatível
+// (bispo/dama numa diagonal, torre/dama numa reta) a atacaria -- vulnerabilidade a um
+// pin/ataque descoberto potencial, não um ataque já realizado.
+static Score computeWeakQueenScore(const Board& board, Color side) {
+    Bitboard ownQueens = board.pieces(side, PieceType::QUEEN);
+    if (!ownQueens.any()) return Score{};
+    Color enemy = ~side;
+    Bitboard enemyDiagSliders = board.pieces(enemy, PieceType::BISHOP) | board.pieces(enemy, PieceType::QUEEN);
+    Bitboard enemyOrthoSliders = board.pieces(enemy, PieceType::ROOK) | board.pieces(enemy, PieceType::QUEEN);
+    static constexpr int kDirs[8][2] = { {1,0},{-1,0},{0,1},{0,-1},{1,1},{1,-1},{-1,1},{-1,-1} };
+    Score score;
+    Bitboard qbb = ownQueens;
+    while (qbb.any()) {
+        Square qsq = qbb.poplsb();
+        int qf = qsq.file(), qr = qsq.rank();
+        for (int d = 0; d < 8; ++d) {
+            bool diagonal = kDirs[d][0] != 0 && kDirs[d][1] != 0;
+            Bitboard relevantSliders = diagonal ? enemyDiagSliders : enemyOrthoSliders;
+            if (!relevantSliders.any()) continue;
+            int f = qf, r = qr;
+            Square blocker = SQ_NONE;
+            for (int step = 0; step < 7; ++step) {
+                f += kDirs[d][0]; r += kDirs[d][1];
+                if (f < 0 || f > 7 || r < 0 || r > 7) break;
+                Square sq((r << 3) | f);
+                if (!board.allOcc.test(sq.value())) continue;
+                if (!blocker.isValid()) {
+                    blocker = sq;
+                    continue;
+                }
+                if (relevantSliders.test(sq.value())) score += kThreatW.weakQueen;
+                break;
+            }
+        }
+    }
+    return score;
+}
+
 // Conta os 7 termos para `side` atacando o adversário; devolve a soma já pesada (mg,eg).
 static Score computeThreatScore(const Board& board, Color side, const AttackInfo& us, const AttackInfo& them) {
     Color enemy = ~side;
@@ -407,13 +453,58 @@ static Score computeThreatScore(const Board& board, Color side, const AttackInfo
         Bitboard restricted = them.all & ~stronglyProtected & us.all;
         score += kThreatW.restrictedPiece * restricted.popcount();
     }
+    Bitboard safe = ~them.all | us.all;
     // ThreatBySafePawn: peões nossos em casas safe atacando peças inimigas não-peão.
     {
-        Bitboard safe = ~them.all | us.all;
         Bitboard safePawns = board.pieces(side, PieceType::PAWN) & safe;
         Bitboard pawnAtk = (side == Color::WHITE) ? attacks::pawnAttacks<Color::WHITE>(safePawns)
                                                    : attacks::pawnAttacks<Color::BLACK>(safePawns);
         score += kThreatW.threatBySafePawn * (pawnAtk & nonPawnEnemiesReal).popcount();
+    }
+    // ThreatByPawnPush: peões nossos que poderiam empurrar (1 ou 2 casas, se ainda na
+    // rank inicial) para uma casa safe e não atacada por peão inimigo, e dali atacariam
+    // uma peça inimiga não-peão -- ameaça "latente", ainda não realizada.
+    {
+        Bitboard occ = board.allOcc;
+        Bitboard ownPawns = board.pieces(side, PieceType::PAWN);
+        Bitboard push1, push2;
+        if (side == Color::WHITE) {
+            push1 = Bitboard(ownPawns.value() << 8) & ~occ;
+            Bitboard startRank2 = Bitboard(ownPawns.value() & 0x000000000000FF00ULL);
+            push2 = Bitboard((Bitboard(startRank2.value() << 8) & ~occ).value() << 8) & ~occ;
+        } else {
+            push1 = Bitboard(ownPawns.value() >> 8) & ~occ;
+            Bitboard startRank7 = Bitboard(ownPawns.value() & 0x00FF000000000000ULL);
+            push2 = Bitboard((Bitboard(startRank7.value() >> 8) & ~occ).value() >> 8) & ~occ;
+        }
+        Bitboard pushTargets = (push1 | push2) & safe & ~them.byPawn;
+        Bitboard pushAtk = (side == Color::WHITE) ? attacks::pawnAttacks<Color::WHITE>(pushTargets)
+                                                   : attacks::pawnAttacks<Color::BLACK>(pushTargets);
+        score += kThreatW.threatByPawnPush * (pushAtk & nonPawnEnemiesReal).popcount();
+    }
+    // KnightOnQueen / SliderOnQueen: só fazem sentido com exatamente 1 dama inimiga.
+    Bitboard enemyQueens = board.pieces(enemy, PieceType::QUEEN);
+    if (enemyQueens.popcount() == 1) {
+        Square eqSq = enemyQueens.lsb();
+        Bitboard ownPawns = board.pieces(side, PieceType::PAWN);
+        Bitboard localSafe = ~ownPawns & ~stronglyProtected;
+        bool queenImbalance = board.pieces(side, PieceType::QUEEN).popcount() == 1;
+        int mult = queenImbalance ? 2 : 1;
+        // KnightOnQueen: temos um cavalo que ataca a casa da dama (via padrão de salto
+        // de cavalo a partir dessa casa, simétrico) E essa casa está localSafe.
+        {
+            Bitboard knightFromQueen = attacks::knightAttacks(eqSq);
+            Bitboard cnt = us.byKnight & knightFromQueen & localSafe;
+            score += kThreatW.knightOnQueen * cnt.popcount() * mult;
+        }
+        // SliderOnQueen: bispo/torre nossos atacam a casa da dama através de uma casa
+        // que é localSafe E está atacada 2x por nós (caminho duplamente apoiado).
+        {
+            Bitboard occ = board.allOcc;
+            Bitboard sliderFromQueen = attacks::bishopAttacks(eqSq, occ) | attacks::rookAttacks(eqSq, occ);
+            Bitboard cnt = (us.byBishop | us.byRook) & sliderFromQueen & localSafe & us.all2;
+            score += kThreatW.sliderOnQueen * cnt.popcount() * mult;
+        }
     }
     return score;
 }
@@ -424,7 +515,7 @@ static int staticEval(const Board& board) {
     if (napoleon::nnue::isLoaded()) {
         score = napoleon::nnue::evaluate(board);
     } else {
-        // HCE de diagnóstico (sem rede NNUE): PSQT calibrado (já inclui o valor de
+        // HCE (sem rede NNUE): PSQT calibrado (já inclui o valor de
         // material implícito, ver comentário acima das tabelas -- NÃO soma material à
         // parte, duplicaria) + termos de threats + mobility, todos calibrados juntos via
         // Texel tuning a partir de posições reais, cada um agora como par {mg,eg}
@@ -449,6 +540,8 @@ static int staticEval(const Board& board) {
         s -= computeKingSafetyScore(board, Color::BLACK, whiteAtk);
         s += computePawnStructureScore(board, Color::WHITE);
         s -= computePawnStructureScore(board, Color::BLACK);
+        s += computeWeakQueenScore(board, Color::WHITE);
+        s -= computeWeakQueenScore(board, Color::BLACK);
         // Interpolação MG/EG pela fase do jogo (material restante) -- ver gamePhase().
         int phase = gamePhase(board);
         int sTapered = (s.mg * phase + s.eg * (MAX_PHASE - phase)) / MAX_PHASE;
@@ -1503,7 +1596,7 @@ static int search(Board& board, int depth, int alpha, int beta,
                 // return com valor aproximado a partir duma busca reduzida injeta um score
                 // instável no pai (janelas de aspiração, outras podas) -- confirmado como
                 // causa real duma explosão de nós (depth 16→17: 2.2M→125M nós, 152s) no HCE
-                // de diagnóstico: o HCE tem mais variância entre profundidades que a NNUE,
+                // aqui: o HCE tem mais variância entre profundidades que a NNUE,
                 // tornando este corte aproximado MUITO menos fiável. Sem return: o lance da
                 // TT é processado abaixo como qualquer outro, só não testamos os restantes.
                 multiCutSignal = true;
