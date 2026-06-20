@@ -61,6 +61,35 @@ static bool checkTime(SearchInfo& info) {
 // fallback material+threats de staticEval poder reutilizá-la sem reordenar o ficheiro.
 static Bitboard computeSideAttacks(const Board& board, Color side);
 
+// 🦅 Tapered Eval (HCE fase 4): par {mg,eg} interpolado pela fase do jogo (material
+// restante), em vez de um único valor por termo. Resolve a anomalia encontrada na 1ª
+// calibragem sem fase (Texel tuning linear absorvia "peão em d2" vs "peão em d4" de
+// forma invertida, por correlação espúria entre a casa do peão e a fase do jogo nos
+// dados -- um único peso não consegue distinguir "isto é bom porque é cedo no jogo" de
+// "isto é bom porque é esta casa"). Todas as tabelas abaixo foram inicializadas
+// REPLICANDO o valor único da calibragem anterior em AMBAS as fases (mg=eg=valor antigo)
+// -- placeholder até o próximo retreino do texel_tuner (que agora extrai dois pesos por
+// feature, ponderados pela fase de CADA posição) diferenciar mg/eg de facto.
+struct Score {
+    int mg = 0, eg = 0;
+    Score& operator+=(Score o) { mg += o.mg; eg += o.eg; return *this; }
+    Score& operator-=(Score o) { mg -= o.mg; eg -= o.eg; return *this; }
+    Score operator-() const { return {-mg, -eg}; }
+};
+static inline Score operator*(Score s, int k) { return {s.mg * k, s.eg * k}; }
+
+// Pesos de fase clássicos (Fruit/SF antigo): peão=0, menor=1, torre=2, dama=4; rei não
+// conta. MAX_PHASE = 4*1(cavalos)+4*1(bispos)+4*2(torres)+2*4(damas) = 24.
+static constexpr int kPhaseWeight[6] = { 0, 1, 1, 2, 4, 0 };
+static constexpr int MAX_PHASE = 24;
+static int gamePhase(const Board& board) {
+    int phase = 0;
+    for (int side = 0; side < 2; ++side)
+        for (int pt = 0; pt < 6; ++pt)
+            phase += board.pieceBB[side][pt].popcount() * kPhaseWeight[pt];
+    return std::min(phase, MAX_PHASE);
+}
+
 // PSQTs calibradas via Texel tuning (training/texel_tuner, Rust) a partir de 3.6 BILIÕES
 // de posições reais do binpack test80-2024-06-jun-2tb7p.min-v2.v6 -- ficheiro inteiro, sem
 // filtro de ply (abertura, meio-jogo, finais e posições de mate todos incluídos), com fit
@@ -70,67 +99,67 @@ static Bitboard computeSideAttacks(const Board& board, Color side);
 // sem termo de material separado) -- por isso staticEval() NÃO soma um termo de material à
 // parte, só estas tabelas + os termos de threats (também calibrados juntos).
 // Tabelas da perspetiva das BRANCAS (a8=0 .. h1=63); pretas leem espelhado (sq^56).
-static const int kPsqtPawn[64] = {
-       0,    0,    0,    0,    0,    0,    0,    0,
-      98,  100,   75,   65,   83,  106,  113,   90,
-      95,   95,   79,   63,   83,   94,  104,   81,
-      94,   99,  100,   91,   98,   84,  106,   81,
-     105,  114,   91,   84,  105,  108,  109,  101,
-     146,  154,  140,  143,  135,  122,  132,  141,
-     222,  215,  216,  200,  204,  177,  187,  193,
-       0,    0,    0,    0,    0,    0,    0,    0,
+static const Score kPsqtPawn[64] = {
+    {0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},
+    {98,98},{100,100},{75,75},{65,65},{83,83},{106,106},{113,113},{90,90},
+    {95,95},{95,95},{79,79},{63,63},{83,83},{94,94},{104,104},{81,81},
+    {94,94},{99,99},{100,100},{91,91},{98,98},{84,84},{106,106},{81,81},
+    {105,105},{114,114},{91,91},{84,84},{105,105},{108,108},{109,109},{101,101},
+    {146,146},{154,154},{140,140},{143,143},{135,135},{122,122},{132,132},{141,141},
+    {222,222},{215,215},{216,216},{200,200},{204,204},{177,177},{187,187},{193,193},
+    {0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},
 };
-static const int kPsqtKnight[64] = {
-     145,  150,  141,  152,  134,  130,  148,  137,
-     134,  142,  145,  156,  168,  159,  143,  129,
-     143,  170,  178,  185,  183,  184,  180,  147,
-     175,  188,  194,  198,  194,  202,  189,  176,
-     184,  202,  202,  209,  203,  214,  208,  207,
-     191,  210,  195,  223,  206,  234,  215,  219,
-     172,  184,  223,  202,  239,  219,  204,  197,
-     142,  192,  184,  183,  229,  189,  208,  138,
+static const Score kPsqtKnight[64] = {
+    {145,145},{150,150},{141,141},{152,152},{134,134},{130,130},{148,148},{137,137},
+    {134,134},{142,142},{145,145},{156,156},{168,168},{159,159},{143,143},{129,129},
+    {143,143},{170,170},{178,178},{185,185},{183,183},{184,184},{180,180},{147,147},
+    {175,175},{188,188},{194,194},{198,198},{194,194},{202,202},{189,189},{176,176},
+    {184,184},{202,202},{202,202},{209,209},{203,203},{214,214},{208,208},{207,207},
+    {191,191},{210,210},{195,195},{223,223},{206,206},{234,234},{215,215},{219,219},
+    {172,172},{184,184},{223,223},{202,202},{239,239},{219,219},{204,204},{197,197},
+    {142,142},{192,192},{184,184},{183,183},{229,229},{189,189},{208,208},{138,138},
 };
-static const int kPsqtBishop[64] = {
-     194,  223,  189,  182,  174,  184,  185,  193,
-     212,  206,  212,  195,  204,  188,  219,  219,
-     220,  222,  208,  226,  212,  204,  212,  216,
-     208,  201,  219,  209,  209,  222,  203,  221,
-     211,  230,  219,  218,  236,  220,  226,  219,
-     197,  216,  197,  219,  212,  195,  232,  229,
-     199,  211,  231,  209,  199,  212,  174,  209,
-     179,  204,  196,  217,  217,  183,  176,  194,
+static const Score kPsqtBishop[64] = {
+    {194,194},{223,223},{189,189},{182,182},{174,174},{184,184},{185,185},{193,193},
+    {212,212},{206,206},{212,212},{195,195},{204,204},{188,188},{219,219},{219,219},
+    {220,220},{222,222},{208,208},{226,226},{212,212},{204,204},{212,212},{216,216},
+    {208,208},{201,201},{219,219},{209,209},{209,209},{222,222},{203,203},{221,221},
+    {211,211},{230,230},{219,219},{218,218},{236,236},{220,220},{226,226},{219,219},
+    {197,197},{216,216},{197,197},{219,219},{212,212},{195,195},{232,232},{229,229},
+    {199,199},{211,211},{231,231},{209,209},{199,199},{212,212},{174,174},{209,209},
+    {179,179},{204,204},{196,196},{217,217},{217,217},{183,183},{176,176},{194,194},
 };
-static const int kPsqtRook[64] = {
-     314,  308,  330,  337,  322,  316,  297,  298,
-     297,  308,  317,  321,  308,  314,  299,  296,
-     300,  322,  331,  328,  318,  323,  337,  320,
-     329,  337,  338,  338,  332,  342,  324,  323,
-     346,  347,  351,  349,  351,  353,  349,  343,
-     353,  357,  366,  364,  362,  370,  360,  352,
-     360,  361,  365,  377,  361,  386,  365,  364,
-     341,  345,  341,  331,  342,  337,  352,  349,
+static const Score kPsqtRook[64] = {
+    {314,314},{308,308},{330,330},{337,337},{322,322},{316,316},{297,297},{298,298},
+    {297,297},{308,308},{317,317},{321,321},{308,308},{314,314},{299,299},{296,296},
+    {300,300},{322,322},{331,331},{328,328},{318,318},{323,323},{337,337},{320,320},
+    {329,329},{337,337},{338,338},{338,338},{332,332},{342,342},{324,324},{323,323},
+    {346,346},{347,347},{351,351},{349,349},{351,351},{353,353},{349,349},{343,343},
+    {353,353},{357,357},{366,366},{364,364},{362,362},{370,370},{360,360},{352,352},
+    {360,360},{361,361},{365,365},{377,377},{361,361},{386,386},{365,365},{364,364},
+    {341,341},{345,345},{341,341},{331,331},{342,342},{337,337},{352,352},{349,349},
 };
-static const int kPsqtQueen[64] = {
-     553,  560,  539,  568,  537,  520,  553,  539,
-     547,  557,  576,  561,  567,  562,  534,  553,
-     562,  564,  576,  562,  575,  571,  577,  576,
-     563,  565,  575,  575,  586,  584,  585,  594,
-     566,  576,  575,  580,  603,  594,  584,  588,
-     545,  572,  587,  598,  615,  610,  608,  607,
-     563,  559,  605,  591,  596,  599,  594,  612,
-     556,  569,  577,  521,  586,  589,  577,  587,
+static const Score kPsqtQueen[64] = {
+    {553,553},{560,560},{539,539},{568,568},{537,537},{520,520},{553,553},{539,539},
+    {547,547},{557,557},{576,576},{561,561},{567,567},{562,562},{534,534},{553,553},
+    {562,562},{564,564},{576,576},{562,562},{575,575},{571,571},{577,577},{576,576},
+    {563,563},{565,565},{575,575},{575,575},{586,586},{584,584},{585,585},{594,594},
+    {566,566},{576,576},{575,575},{580,580},{603,603},{594,594},{584,584},{588,588},
+    {545,545},{572,572},{587,587},{598,598},{615,615},{610,610},{608,608},{607,607},
+    {563,563},{559,559},{605,605},{591,591},{596,596},{599,599},{594,594},{612,612},
+    {556,556},{569,569},{577,577},{521,521},{586,586},{589,589},{577,577},{587,587},
 };
-static const int kPsqtKing[64] = {
-     -28,   -1,  -12,  -47,  -30,  -39,   -3,  -24,
-      -3,  -10,  -18,  -30,  -27,  -23,  -17,  -22,
-     -16,   -4,  -10,   -4,  -13,  -10,  -19,  -16,
-      -7,   14,   12,   26,    5,    2,   11,  -11,
-       5,   27,   35,   44,   46,   34,   21,    7,
-       9,   27,   62,   56,   64,   67,   35,   33,
-      -9,   19,   39,   51,   59,   43,   26,    6,
-      -2,   -9,   21,   21,   17,   28,    5,   14,
+static const Score kPsqtKing[64] = {
+    {-28,-28},{-1,-1},{-12,-12},{-47,-47},{-30,-30},{-39,-39},{-3,-3},{-24,-24},
+    {-3,-3},{-10,-10},{-18,-18},{-30,-30},{-27,-27},{-23,-23},{-17,-17},{-22,-22},
+    {-16,-16},{-4,-4},{-10,-10},{-4,-4},{-13,-13},{-10,-10},{-19,-19},{-16,-16},
+    {-7,-7},{14,14},{12,12},{26,26},{5,5},{2,2},{11,11},{-11,-11},
+    {5,5},{27,27},{35,35},{44,44},{46,46},{34,34},{21,21},{7,7},
+    {9,9},{27,27},{62,62},{56,56},{64,64},{67,67},{35,35},{33,33},
+    {-9,-9},{19,19},{39,39},{51,51},{59,59},{43,43},{26,26},{6,6},
+    {-2,-2},{-9,-9},{21,21},{21,21},{17,17},{28,28},{5,5},{14,14},
 };
-static const int* const kPsqt[6] = { kPsqtPawn, kPsqtKnight, kPsqtBishop, kPsqtRook, kPsqtQueen, kPsqtKing };
+static const Score* const kPsqt[6] = { kPsqtPawn, kPsqtKnight, kPsqtBishop, kPsqtRook, kPsqtQueen, kPsqtKing };
 
 // HCE de diagnóstico, fase 2: termos de threats inspirados na estrutura conceptual do
 // threats() do Stockfish (src/evaluate.cpp, era clássica sf_12..sf_16 -- ideias/lista de
@@ -172,16 +201,16 @@ static AttackInfo computeAttackInfo(const Board& board, Color side) {
             info.all2 |= (cats[i] & cats[j]);
     return info;
 }
-// Pesos treináveis via texel_tuner (training/texel_tuner/), valores iniciais = 0 até à
-// primeira calibragem -- atualizar manualmente colando o output do tuner aqui.
+// Pesos treináveis via texel_tuner (training/texel_tuner/), valores iniciais = (mg=eg=
+// valor da calibragem anterior sem fase) até ao próximo retreino com tapered eval.
 struct ThreatWeights {
-    int threatByMinor[6] = {10,23,26,19,-37,-141};  // indexado por PieceType da peça atacada
-    int threatByRook[6]  = {12,6,22,-4,41,-175};
-    int threatByKing      = 42;
-    int hanging           = 25;
-    int weakQueenProt     = 1;
-    int restrictedPiece   = 2;
-    int threatBySafePawn  = 58;
+    Score threatByMinor[6] = {{10,10},{23,23},{26,26},{19,19},{-37,-37},{-141,-141}};
+    Score threatByRook[6]  = {{12,12},{6,6},{22,22},{-4,-4},{41,41},{-175,-175}};
+    Score threatByKing      = {42,42};
+    Score hanging           = {25,25};
+    Score weakQueenProt     = {1,1};
+    Score restrictedPiece   = {2,2};
+    Score threatBySafePawn  = {58,58};
 };
 static const ThreatWeights kThreatW;
 
@@ -193,18 +222,18 @@ static const ThreatWeights kThreatW;
 // clássica). Tamanhos das tabelas = máximo de casas alcançáveis por tipo de peça
 // (Knight≤8, Bishop≤13, Rook≤14, Queen≤27 -- +1 cada p/ incluir o 0).
 struct MobilityWeights {
-    int knight[9]  = {0,0,0,0,0,0,0,0,0};
-    int bishop[14] = {0,0,0,0,0,0,0,0,0,0,0,0,0,0};
-    int rook[15]   = {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0};
-    int queen[28]  = {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0};
+    Score knight[9]  = {};
+    Score bishop[14] = {};
+    Score rook[15]   = {};
+    Score queen[28]  = {};
 };
 static const MobilityWeights kMobilityW;
-static int computeMobilityScore(const Board& board, Color side, const AttackInfo& them) {
+static Score computeMobilityScore(const Board& board, Color side, const AttackInfo& them) {
     Bitboard ownPieces = Bitboard(0ULL);
     for (int pt = 0; pt < 6; ++pt) ownPieces |= board.pieceBB[int(side)][pt];
     Bitboard mobilityArea = ~ownPieces & ~them.byPawn;
     Bitboard occ = board.allOcc;
-    int score = 0;
+    Score score;
     Bitboard bb = board.pieces(side, PieceType::KNIGHT);
     while (bb.any()) {
         int cnt = (attacks::knightAttacks(bb.poplsb()) & mobilityArea).popcount();
@@ -229,8 +258,8 @@ static int computeMobilityScore(const Board& board, Color side, const AttackInfo
     return score;
 }
 
-// Conta os 7 termos para `side` atacando o adversário; devolve a soma já pesada (cp).
-static int computeThreatScore(const Board& board, Color side, const AttackInfo& us, const AttackInfo& them) {
+// Conta os 7 termos para `side` atacando o adversário; devolve a soma já pesada (mg,eg).
+static Score computeThreatScore(const Board& board, Color side, const AttackInfo& us, const AttackInfo& them) {
     Color enemy = ~side;
     Bitboard enemyAll = Bitboard(0ULL);
     for (int pt = 0; pt < 6; ++pt) enemyAll |= board.pieceBB[int(enemy)][pt];
@@ -241,7 +270,7 @@ static int computeThreatScore(const Board& board, Color side, const AttackInfo& 
     Bitboard defended = nonPawnEnemiesReal & stronglyProtected;
     Bitboard weak = enemyAll & ~stronglyProtected & us.all;
 
-    int score = 0;
+    Score score;
     // ThreatByMinor: minor ataca (defended|weak), soma por tipo de peça atacada.
     Bitboard minorTargets = (defended | weak) & (us.byKnight | us.byBishop);
     {
@@ -295,11 +324,13 @@ static int staticEval(const Board& board) {
     } else {
         // HCE de diagnóstico (sem rede NNUE): PSQT calibrado (já inclui o valor de
         // material implícito, ver comentário acima das tabelas -- NÃO soma material à
-        // parte, duplicaria) + termos de threats, ambos calibrados juntos via Texel
-        // tuning a partir de posições reais. Convenção do motor: sq=0 é a1 (rank1), a
-        // tabela está escrita com linha 0 = rank8 — por isso brancas leem sq^56
-        // (inverte o rank), pretas leem sq diretamente (simetria especular completa).
-        int s = 0;
+        // parte, duplicaria) + termos de threats + mobility, todos calibrados juntos via
+        // Texel tuning a partir de posições reais, cada um agora como par {mg,eg}
+        // interpolado pela fase do jogo (ver comentário em Score/gamePhase acima).
+        // Convenção do motor: sq=0 é a1 (rank1), a tabela está escrita com linha 0 =
+        // rank8 — por isso brancas leem sq^56 (inverte o rank), pretas leem sq
+        // diretamente (simetria especular completa).
+        Score s;
         for (int pt = 0; pt < 6; ++pt) {
             Bitboard wp = board.pieceBB[0][pt];
             while (wp.any()) s += kPsqt[pt][wp.poplsb().value() ^ 56];
@@ -312,6 +343,9 @@ static int staticEval(const Board& board) {
         s -= computeThreatScore(board, Color::BLACK, blackAtk, whiteAtk);
         s += computeMobilityScore(board, Color::WHITE, blackAtk);
         s -= computeMobilityScore(board, Color::BLACK, whiteAtk);
+        // Interpolação MG/EG pela fase do jogo (material restante) -- ver gamePhase().
+        int phase = gamePhase(board);
+        int sTapered = (s.mg * phase + s.eg * (MAX_PHASE - phase)) / MAX_PHASE;
         // 🦅 Reescala global do HCE: o PSQT calibrado tem médias bem menores que
         // kPieceValue (Dama≈574 vs 975, Cavalo≈182 vs 325 -- fator ~1.5x médio entre
         // peças). kPieceValue é usado em VÁRIOS sítios da busca somado DIRETAMENTE ao
@@ -325,8 +359,8 @@ static int staticEval(const Board& board) {
         // margens de uma vez, mantendo o resto do código (SEE, MVV-LVA, kPieceValue)
         // intocado -- só staticEval() muda de escala.
         static constexpr double HCE_RESCALE = 1.5;
-        s = (int)(s * HCE_RESCALE);
-        score = board.sideToMove() == Color::WHITE ? s : -s;
+        sTapered = (int)(sTapered * HCE_RESCALE);
+        score = board.sideToMove() == Color::WHITE ? sTapered : -sTapered;
     }
     // Escala pelo halfmove clock: aproxima a regra dos 50 lances — a eval
     // perde força à medida que o contador sobe (posição a tender a empate).
