@@ -1028,8 +1028,19 @@ static int search(Board& board, int depth, int alpha, int beta,
             // SEE Pruning para QUIETOS: gap vs SF/Reckless — só prunávamos capturas por SEE.
             // Um lance tranquilo que perde material na troca (ex.: mover p/ uma casa atacada
             // sem compensação) raramente vale a pena testar a pouca profundidade.
+            // 🦅 FIX: usava `depth` (bruto) no limiar -- confirmado lendo o código real do
+            // SF (src/search.cpp) que usa especificamente `lmrDepth` (a profundidade JÁ
+            // reduzida pelo LMR que este lance levaria) para a versão quadrática em
+            // quietos, não a profundidade bruta. lmrDepth <= depth sempre, por isso
+            // depth² dava um limiar mais permissivo (mais negativo) do que devia —
+            // prunava sistematicamente MENOS do que o SF pretende nesta técnica
+            // específica. Reckless usa depth bruto nas duas (captura e quieto), por isso
+            // esta escolha segue especificamente o SF, não é consenso entre os dois.
+            int seeLmrDepth = depth;
+            if (depth >= LMR_MIN_DEPTH && legalCnt >= LMR_MIN_MOVES)
+                seeLmrDepth = std::max(depth - gLmrTable[std::min(depth, 63)][std::min(legalCnt, 63)], 0);
             if (depth <= QUIET_SEE_PRUNE_MAX_DEPTH
-                && !seeGE(board, m, -QUIET_SEE_PRUNE_MARGIN * depth * depth)) {
+                && !seeGE(board, m, -QUIET_SEE_PRUNE_MARGIN * seeLmrDepth * seeLmrDepth)) {
                 ++quietTried;
                 continue;
             }
