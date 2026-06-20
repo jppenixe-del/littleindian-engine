@@ -1444,10 +1444,21 @@ static void searchBody(Board& board, const Limits& limits, bool isMain, uint64_t
             for (;;) {
                 score = search(board, depth, alpha, beta, 0, true, info);
                 if (info.stopped) break;
+                // 🦅 FIX (bug real e provavelmente a causa principal do défice de hoje):
+                // ao falhar, só se movia o limite que falhou — o OUTRO ficava obsoleto
+                // (beta antigo num fail-low, alpha antigo num fail-high), produzindo
+                // janelas cada vez mais desalinhadas/degeneradas a cada falha. Confirmado
+                // lendo o código real do SF e do Reckless: AMBOS recalculam os DOIS
+                // limites em conjunto a cada falha (SF: "beta=alpha; alpha=score-delta"
+                // no fail-low; Reckless faz o mesmo com uma fórmula equivalente). Sem
+                // isto, esta técnica nunca tinha sido validada (nem testada isolada) —
+                // só foi apanhado agora, ao isolar aspiration windows para teste.
                 if (score <= alpha) {
+                    beta  = alpha;
                     alpha = std::max(score - delta, -INF_SCORE);
                 } else if (score >= beta) {
-                    beta = std::min(score + delta, INF_SCORE);
+                    alpha = std::max(beta - delta, alpha);
+                    beta  = std::min(score + delta, INF_SCORE);
                 } else {
                     break;
                 }
