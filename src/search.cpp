@@ -574,6 +574,53 @@ static thread_local int gKillers[128][2];
 static thread_local int gReductionAtPly[128];  // redução LMR aplicada pelo PAI a descer para esta ply
 static thread_local int gEvalAtPly[128];       // eval (corrigida) do nó nesta ply, POV de quem joga aí
 
+static void formatMoveUci(Move m, char* out) {
+    out[0] = 'a' + (m.from() & 7);
+    out[1] = '1' + (m.from() >> 3);
+    out[2] = 'a' + (m.to() & 7);
+    out[3] = '1' + (m.to() >> 3);
+    out[4] = '\0';
+    if (m.isPromo()) {
+        const char pc[] = "nbrq";
+        out[4] = pc[m.flags() & 3];
+        out[5] = '\0';
+    }
+}
+
+// Tabela PV triangular: gPvTable[ply] guarda a continuação completa a partir desse ply
+// (até gPvLength[ply] lances), atualizada DURANTE a busca sempre que um lance melhora
+// alpha. Gap real corrigido: a linha "pv" só mostrava o primeiro lance ("just best move
+// for now", segundo o próprio comentário antigo — nunca tinha sido terminado). Uma
+// primeira tentativa reconstruía a PV percorrendo a TT no FIM da busca — falhava na
+// prática: confirmado por instrumentação que a entrada da TT da posição-filha era quase
+// sempre um MISS nesse momento (substituída por outras posições exploradas depois na
+// mesma busca, índice partilhado sem buckets) — a PV parava sempre no 1º lance. A
+// tabela triangular não tem este problema: o valor é capturado no INSTANTE em que a
+// linha é a melhor conhecida, não reconstruído depois a partir duma tabela que já mudou.
+static thread_local Move gPvTable[130][130];
+static thread_local int  gPvLength[130];
+
+static void updatePv(int ply, Move m) {
+    int p = std::min(ply, 129);
+    gPvTable[p][0] = m;
+    int childLen = std::min(gPvLength[std::min(p + 1, 129)], 128);
+    for (int i = 0; i < childLen; ++i)
+        gPvTable[p][i + 1] = gPvTable[std::min(p + 1, 129)][i];
+    gPvLength[p] = childLen + 1;
+}
+
+static int formatPv(const Move* moves, int len, char* out, size_t outSize) {
+    int written = 0;
+    for (int i = 0; i < len; ++i) {
+        char mstr[8];
+        formatMoveUci(moves[i], mstr);
+        int n = snprintf(out + written, outSize - written, "%s%s", written ? " " : "", mstr);
+        if (n < 0 || (size_t)(written + n) >= outSize) break;
+        written += n;
+    }
+    return written;
+}
+
 // ─── Aspiration Windows ──────────────────────────────────────────────────
 static int ASPIRATION_MIN_DEPTH = 4;
 static int ASPIRATION_DELTA     = 16;
@@ -686,6 +733,7 @@ static int search(Board& board, int depth, int alpha, int beta,
     if (info.stopped || checkTime(info)) return 0;
 
     const bool root = (ply == 0);
+    gPvLength[std::min(ply, 129)] = 0;  // limpa lixo de uma chamada anterior a este mesmo ply
 
     // Empate por repetição ou regra dos 50 lances — antes de tudo, inclusive
     // da TT (uma posição repetida não deve confiar num score de outro caminho).
@@ -1104,6 +1152,7 @@ static int search(Board& board, int depth, int alpha, int beta,
             if (score > alpha) {
                 alpha = score;
                 bound = Bound::EXACT;
+                updatePv(ply, m);
                 if (score >= beta) {
                     if (m.isCapture()) {
                         // Capture History: bónus à captura que cortou, malus
@@ -1405,17 +1454,13 @@ static void searchBody(Board& board, const Limits& limits, bool isMain, uint64_t
             snprintf(scoreStr, sizeof(scoreStr), "cp %d", score);
         }
 
-        // Format PV (just best move for now)
-        char pv[16] = {};
+        // PV completa via tabela triangular (gap real: só mostrava o primeiro lance
+        // antes). gPvTable[0]/gPvLength[0] refletem a melhor linha encontrada na raiz
+        // nesta iteração.
+        char pv[512] = {};
         if (!bestMove.isNull()) {
-            pv[0] = 'a' + (bestMove.from() & 7);
-            pv[1] = '1' + (bestMove.from() >> 3);
-            pv[2] = 'a' + (bestMove.to() & 7);
-            pv[3] = '1' + (bestMove.to() >> 3);
-            if (bestMove.isPromo()) {
-                const char pc[] = "nbrq";
-                pv[4] = pc[bestMove.flags() & 3];
-            }
+            int n = formatPv(gPvTable[0], gPvLength[0], pv, sizeof(pv));
+            if (n == 0) formatMoveUci(bestMove, pv);  // PV vazia por algum motivo raro — fallback ao 1º lance
         }
 
         if (isMain) {
@@ -1460,15 +1505,9 @@ static void searchBody(Board& board, const Limits& limits, bool isMain, uint64_t
                 } else {
                     snprintf(pvScoreStr, sizeof(pvScoreStr), "cp %d", pvScore);
                 }
-                char pvStr[16] = {};
-                pvStr[0] = 'a' + (pvMove.from() & 7);
-                pvStr[1] = '1' + (pvMove.from() >> 3);
-                pvStr[2] = 'a' + (pvMove.to() & 7);
-                pvStr[3] = '1' + (pvMove.to() >> 3);
-                if (pvMove.isPromo()) {
-                    const char pc[] = "nbrq";
-                    pvStr[4] = pc[pvMove.flags() & 3];
-                }
+                char pvStr[512] = {};
+                int pvN = formatPv(gPvTable[0], gPvLength[0], pvStr, sizeof(pvStr));
+                if (pvN == 0) formatMoveUci(pvMove, pvStr);
                 int64_t pvElapsed = nowMs() - info.startMs;
                 uint64_t pvNps = pvElapsed > 0 ? info.nodes * 1000 / pvElapsed : info.nodes;
                 napoleon::wdl::Probs pvWdl = napoleon::wdl::expectedWDL(pvScore);
@@ -1574,6 +1613,8 @@ void search(Board& board, const Limits& limits, uint64_t* nodesOut) {
     gGlobalStop.store(true, std::memory_order_relaxed);
     for (auto& t : helpers) t.join();
 }
+
+void requestStop() { gGlobalStop.store(true, std::memory_order_relaxed); }
 
 int seeValue(const Board& board, Move m) {
     int lo = -2000, hi = 2000;

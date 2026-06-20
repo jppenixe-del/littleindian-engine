@@ -14,6 +14,7 @@
 #include <sstream>
 #include <iostream>
 #include <chrono>
+#include <thread>
 
 static constexpr char START_FEN[] =
     "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
@@ -182,6 +183,21 @@ void uci::loop() {
     Board board;
     board.setFen(START_FEN);
 
+    // "go" corre numa thread separada para a thread principal poder continuar a ler
+    // stdin -- sem isto, "stop" enviado durante uma busca em curso ficava parado na
+    // fila do stdin e só era processado DEPOIS da busca terminar (inútil: "go infinite"
+    // + "stop" nunca parava de facto). joinSearch() pede paragem e espera a thread
+    // anterior acabar -- chamado antes de qualquer comando que toque no board (position/
+    // ucinewgame) ou que lance uma busca nova, para nunca haver duas buscas a tocar no
+    // mesmo Board ao mesmo tempo.
+    std::thread searchThread;
+    auto joinSearch = [&]() {
+        if (searchThread.joinable()) {
+            requestStop();
+            searchThread.join();
+        }
+    };
+
     std::string line;
     while (std::getline(std::cin, line)) {
         if (line.empty()) continue;
@@ -245,9 +261,11 @@ void uci::loop() {
                 std::printf("info string unknown option %s\n", name.c_str());
             }
         } else if (cmd == "ucinewgame") {
+            joinSearch();
             board.setFen(START_FEN);
             gTT.clear();
         } else if (cmd == "position") {
+            joinSearch();
             parsePosition(board, line);
         } else if (cmd == "perft") {
             int depth = 1;
@@ -276,9 +294,17 @@ void uci::loop() {
             // e ficava sujeito ao limite de 5s como qualquer jogo por relógio.
             if (sawDepth && limits.movetime == 0 && limits.wtime == 0 && limits.btime == 0)
                 limits.infinite = true;
-            search(board, limits);
+            joinSearch();  // garante que não há busca anterior ainda viva
+            searchThread = std::thread(search, std::ref(board), limits, nullptr);
         } else if (cmd == "stop") {
-            // handled via flag in a real engine; for now no-op
+            // Bug real: não fazia NADA antes -- "go infinite" seguido de "stop" nunca
+            // parava. requestStop() escreve o mesmo flag que checkTime() já lia
+            // internamente; só faltava uma forma de o ativar de fora. Não faz join aqui
+            // de propósito -- a própria thread de busca imprime "bestmove" quando vê o
+            // flag e sai; bloquear o loop UCI a esperar por isso não é necessário (e
+            // atrasaria responder a outros comandos enquanto a busca ainda está a
+            // desenrolar a pilha).
+            requestStop();
         } else if (cmd == "eval") {
             if (napoleon::nnue::isLoaded()) {
                 int score = napoleon::nnue::evaluate(board);
@@ -428,8 +454,10 @@ void uci::loop() {
                 std::printf("Eval: (sem rede carregada)\n");
             }
         } else if (cmd == "quit" || cmd == "exit") {
+            joinSearch();
             break;
         }
         std::fflush(stdout);
     }
+    joinSearch();  // stdin fechou sem "quit" explícito (ex.: EOF) -- não deixar a thread solta
 }

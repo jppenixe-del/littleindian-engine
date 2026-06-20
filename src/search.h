@@ -40,6 +40,10 @@ static inline bool   isMate(int s)  { return std::abs(s) >= MATE_SCORE - 512; }
 
 void search(Board& board, const Limits& limits, uint64_t* nodesOut = nullptr);
 
+// Pedido externo de parada (comando UCI "stop") — search() já lê o mesmo flag
+// internamente via checkTime(), só faltava uma forma de o escrever de fora.
+void requestStop();
+
 // Parâmetros de busca afináveis por SPSA (training/spsa_tune.py), expostos
 // como opções UCI "type spin". printTunableOptions() imprime as linhas
 // "option name ..." (chamar de dentro do handler "uci"); setTunableParam
