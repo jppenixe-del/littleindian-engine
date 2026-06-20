@@ -365,12 +365,16 @@ static int moveScore(const Board& board, Move m, Move ttMove, const int killers[
     PieceType movedPt = board.pieceOn(m.from());
     if (movedPt != PieceType::KING && checkSquares[int(movedPt)].test(m.to()) && seeGE(board, m, 0))
         score += 8000;
+    // Assimetria confirmada no código real do Reckless (escape[pt]/+offense bem menores
+    // que o malus de entrar numa ameaça, -8875 vs +3446 nos valores deles) — punir mais
+    // do que premiar. Mantém a nossa escala própria (proporcional ao history, não cópia
+    // direta dos números deles), só ajustada a razão malus:bónus para ~2:1 em vez de 1:1.
     bool fromThreatened = theirAttacks.test(m.from());
     bool toThreatened    = theirAttacks.test(m.to());
     if (fromThreatened && !toThreatened)
-        score += 2500;   // escapa duma casa atacada para uma segura
+        score += 1500;   // escapa duma casa atacada para uma segura
     else if (!fromThreatened && toThreatened)
-        score -= 2500;   // sai duma casa segura para uma atacada, sem necessidade
+        score -= 3000;   // sai duma casa segura para uma atacada, sem necessidade
     return score;
 }
 
@@ -753,7 +757,7 @@ static int search(Board& board, int depth, int alpha, int beta,
         int evalDelta = eval + parentEval;
         if (priorReduction >= 3 && evalDelta < 0)
             ++depth;
-        else if (!pvNode && depth >= 2 && priorReduction > 0 && evalDelta > 50)
+        else if (!pvNode && depth >= 2 && priorReduction > 0 && evalDelta > 57)
             --depth;
     }
     gEvalAtPly[std::min(ply, 127)] = eval;
@@ -771,7 +775,11 @@ static int search(Board& board, int depth, int alpha, int beta,
         Move parentMove = gMoveAtPly[pPly];
         int parentEval = gEvalAtPly[std::min(ply - 1, 127)];
         int value = -(eval + parentEval);
-        int bonus = std::clamp(value / 2, -150, 300);
+        // Multiplicador e clamp aproximados ao valor real do Reckless (812/128≈6.34,
+        // clamp [-144,324]) em vez do "/2, [-150,300]" anterior — escalas de eval
+        // plausivelmente comparáveis entre motores modernos (ambos cp-like), e o clamp
+        // já estava muito próximo por coincidência.
+        int bonus = std::clamp((value * 812) / 128, -144, 324);
         int moverSide = int(~board.sideToMove());
         int& h = gHistory[moverSide][parentMove.from()][parentMove.to()];
         h += bonus;
