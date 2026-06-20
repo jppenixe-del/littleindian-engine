@@ -228,6 +228,51 @@ struct MobilityWeights {
     Score queen[28]  = {};
 };
 static const MobilityWeights kMobilityW;
+
+// HCE fase 5: King Safety -- zona de perigo à volta do rei (king ring: a própria casa +
+// as 8 adjacentes), conta ataques inimigos por tipo de peça nessa zona, pesados e
+// indexados numa tabela não-linear (mesma ideia clássica SF/Ethereal: o perigo cresce
+// mais que linearmente com o número de atacantes -- 1 atacante é normal, 4+ é critico).
+// Separadamente, penaliza falta de peões-escudo nas 3 casas em frente ao rei (roque
+// destruído/exposto).
+struct KingSafetyWeights {
+    Score attackUnits[50] = {};  // indexado por "unidades de ataque" acumuladas (capadas)
+    Score pawnShieldMissing[4] = {};  // indexado por nº de casas do escudo SEM peão próprio (0..3)
+};
+static const KingSafetyWeights kKingSafetyW;
+// Pesos por tipo de peça atacante (não treináveis -- são só a PONDERAÇÃO usada para somar
+// "unidades de ataque" antes de indexar a tabela; o ganho/perigo REAL fica todo nos pesos
+// treináveis kKingSafetyW.attackUnits[]). Convenção clássica SF: dama pesa mais que torre,
+// que pesa mais que menor.
+static constexpr int kKingAttackWeight[6] = { 0, 2, 2, 3, 5, 0 };  // pawn,knight,bishop,rook,queen,king
+static Score computeKingSafetyScore(const Board& board, Color side, const AttackInfo& them) {
+    Square ksq = board.kingSq(side);
+    Bitboard ring = attacks::kingAttacks(ksq) | Bitboard::fromSquare(ksq);
+    int units = 0;
+    units += kKingAttackWeight[int(PieceType::KNIGHT)] * (them.byKnight & ring).popcount();
+    units += kKingAttackWeight[int(PieceType::BISHOP)] * (them.byBishop & ring).popcount();
+    units += kKingAttackWeight[int(PieceType::ROOK)]   * (them.byRook & ring).popcount();
+    units += kKingAttackWeight[int(PieceType::QUEEN)]  * (them.byQueen & ring).popcount();
+    units += kKingAttackWeight[int(PieceType::PAWN)]   * (them.byPawn & ring).popcount();
+    Score score = kKingSafetyW.attackUnits[std::min(units, 49)];
+
+    // Pawn shield: as 3 casas imediatamente em frente ao rei (rank+1 para brancas,
+    // rank-1 para pretas), nos ficheiros [file-1, file, file+1].
+    int kf = ksq.file(), kr = ksq.rank();
+    int shieldRank = (side == Color::WHITE) ? kr + 1 : kr - 1;
+    int missing = 0;
+    if (shieldRank >= 0 && shieldRank < 8) {
+        Bitboard ownPawns = board.pieces(side, PieceType::PAWN);
+        for (int df = -1; df <= 1; ++df) {
+            int f = kf + df;
+            if (f < 0 || f > 7) continue;
+            Square sq = Square((shieldRank << 3) | f);
+            if (!ownPawns.test(sq.value())) ++missing;
+        }
+    }
+    score += kKingSafetyW.pawnShieldMissing[std::min(missing, 3)];
+    return score;
+}
 static Score computeMobilityScore(const Board& board, Color side, const AttackInfo& them) {
     Bitboard ownPieces = Bitboard(0ULL);
     for (int pt = 0; pt < 6; ++pt) ownPieces |= board.pieceBB[int(side)][pt];
@@ -343,6 +388,8 @@ static int staticEval(const Board& board) {
         s -= computeThreatScore(board, Color::BLACK, blackAtk, whiteAtk);
         s += computeMobilityScore(board, Color::WHITE, blackAtk);
         s -= computeMobilityScore(board, Color::BLACK, whiteAtk);
+        s += computeKingSafetyScore(board, Color::WHITE, blackAtk);
+        s -= computeKingSafetyScore(board, Color::BLACK, whiteAtk);
         // Interpolação MG/EG pela fase do jogo (material restante) -- ver gamePhase().
         int phase = gamePhase(board);
         int sTapered = (s.mg * phase + s.eg * (MAX_PHASE - phase)) / MAX_PHASE;
