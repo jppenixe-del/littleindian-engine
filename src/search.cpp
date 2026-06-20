@@ -61,71 +61,72 @@ static bool checkTime(SearchInfo& info) {
 // fallback material+threats de staticEval poder reutilizá-la sem reordenar o ficheiro.
 static Bitboard computeSideAttacks(const Board& board, Color side);
 
-// PSQTs clássicas de domínio público (Tomasz Michniewski, "Simplified Evaluation
-// Function", chessprogramming.org — referência educacional standard, não proprietárias
-// de nenhum motor específico). Só para o fallback de diagnóstico sem NNUE: sem isto, o
-// material+threats não distingue desenvolvimento/centro/segurança do rei, dando 0.00
-// para QUALQUER lance de abertura — exatamente o que causou "a2a3" como 1º lance.
+// PSQTs calibradas via Texel tuning (training/texel_tuner, Rust, gradient descent Adam
+// em CPU) a partir de 30M posições reais do binpack test80-2024-06-jun-2tb7p.min-v2.v6 --
+// substituem as tabelas clássicas do Michniewski usadas antes da calibragem. Cada valor já
+// inclui o "valor de material implícito" da peça (a tabela foi treinada do zero, pesos
+// iniciais=0, sem termo de material separado) -- por isso staticEval() NÃO soma um termo
+// de material à parte, só estas tabelas + os termos de threats (também calibrados juntos).
 // Tabelas da perspetiva das BRANCAS (a8=0 .. h1=63); pretas leem espelhado (sq^56).
 static const int kPsqtPawn[64] = {
-      0,  0,  0,  0,  0,  0,  0,  0,
-     50, 50, 50, 50, 50, 50, 50, 50,
-     10, 10, 20, 30, 30, 20, 10, 10,
-      5,  5, 10, 25, 25, 10,  5,  5,
-      0,  0,  0, 20, 20,  0,  0,  0,
-      5, -5,-10,  0,  0,-10, -5,  5,
-      5, 10, 10,-20,-20, 10, 10,  5,
-      0,  0,  0,  0,  0,  0,  0,  0,
+       0,    0,    0,    0,    0,    0,    0,    0,
+     126,  126,  104,   97,  106,  138,  147,  113,
+     117,  123,  102,   97,  110,  117,  130,  106,
+     119,  132,  122,  112,  114,  118,  129,  117,
+     148,  133,  127,  120,  138,  131,  125,  139,
+     179,  181,  188,  182,  161,  176,  161,  165,
+     300,  297,  270,  244,  246,  254,  239,  263,
+       0,    0,    0,    0,    0,    0,    0,    0,
 };
 static const int kPsqtKnight[64] = {
-    -50,-40,-30,-30,-30,-30,-40,-50,
-    -40,-20,  0,  0,  0,  0,-20,-40,
-    -30,  0, 10, 15, 15, 10,  0,-30,
-    -30,  5, 15, 20, 20, 15,  5,-30,
-    -30,  0, 15, 20, 20, 15,  0,-30,
-    -30,  5, 10, 15, 15, 10,  5,-30,
-    -40,-20,  0,  5,  5,  0,-20,-40,
-    -50,-40,-30,-30,-30,-30,-40,-50,
+     162,  181,  189,  183,  167,  175,  174,  160,
+     174,  200,  196,  213,  233,  213,  190,  173,
+     185,  211,  243,  250,  241,  228,  231,  205,
+     240,  237,  255,  260,  255,  270,  243,  227,
+     251,  259,  279,  280,  268,  286,  270,  273,
+     251,  276,  263,  285,  295,  302,  296,  278,
+     238,  251,  310,  253,  302,  289,  259,  249,
+     166,  234,  237,  239,  288,  259,  225,  181,
 };
 static const int kPsqtBishop[64] = {
-    -20,-10,-10,-10,-10,-10,-10,-20,
-    -10,  0,  0,  0,  0,  0,  0,-10,
-    -10,  0,  5, 10, 10,  5,  0,-10,
-    -10,  5,  5, 10, 10,  5,  5,-10,
-    -10,  0, 10, 10, 10, 10,  0,-10,
-    -10, 10, 10, 10, 10, 10, 10,-10,
-    -10,  5,  0,  0,  0,  0,  5,-10,
-    -20,-10,-10,-10,-10,-10,-10,-20,
+     265,  279,  231,  237,  230,  243,  254,  261,
+     289,  274,  276,  259,  268,  265,  284,  274,
+     276,  274,  270,  291,  277,  270,  279,  264,
+     283,  277,  286,  277,  281,  286,  268,  272,
+     268,  289,  287,  292,  295,  295,  297,  273,
+     256,  278,  272,  306,  276,  234,  269,  297,
+     261,  263,  279,  263,  271,  282,  244,  263,
+     251,  260,  248,  254,  265,  246,  256,  240,
 };
 static const int kPsqtRook[64] = {
-      0,  0,  0,  0,  0,  0,  0,  0,
-      5, 10, 10, 10, 10, 10, 10,  5,
-     -5,  0,  0,  0,  0,  0,  0, -5,
-     -5,  0,  0,  0,  0,  0,  0, -5,
-     -5,  0,  0,  0,  0,  0,  0, -5,
-     -5,  0,  0,  0,  0,  0,  0, -5,
-     -5,  0,  0,  0,  0,  0,  0, -5,
-      0,  0,  0,  5,  5,  0,  0,  0,
+     400,  412,  426,  439,  424,  415,  399,  392,
+     385,  404,  424,  417,  414,  401,  403,  399,
+     409,  424,  423,  432,  428,  419,  427,  418,
+     413,  428,  447,  429,  432,  437,  439,  426,
+     448,  457,  464,  454,  460,  457,  461,  467,
+     461,  467,  478,  477,  463,  472,  472,  470,
+     473,  477,  483,  485,  478,  487,  491,  475,
+     455,  466,  454,  444,  444,  449,  472,  461,
 };
 static const int kPsqtQueen[64] = {
-    -20,-10,-10, -5, -5,-10,-10,-20,
-    -10,  0,  0,  0,  0,  0,  0,-10,
-    -10,  0,  5,  5,  5,  5,  0,-10,
-     -5,  0,  5,  5,  5,  5,  0, -5,
-      0,  0,  5,  5,  5,  5,  0, -5,
-    -10,  5,  5,  5,  5,  5,  0,-10,
-    -10,  0,  5,  0,  0,  0,  0,-10,
-    -20,-10,-10, -5, -5,-10,-10,-20,
+     755,  741,  721,  744,  716,  700,  718,  728,
+     747,  747,  757,  746,  747,  727,  736,  756,
+     743,  749,  754,  752,  756,  767,  760,  754,
+     753,  761,  773,  765,  768,  768,  792,  777,
+     751,  758,  770,  775,  792,  807,  790,  804,
+     744,  757,  760,  803,  801,  820,  823,  799,
+     755,  749,  782,  779,  817,  807,  793,  825,
+     720,  772,  774,  720,  780,  795,  780,  766,
 };
 static const int kPsqtKing[64] = {
-    -30,-40,-40,-50,-50,-40,-40,-30,
-    -30,-40,-40,-50,-50,-40,-40,-30,
-    -30,-40,-40,-50,-50,-40,-40,-30,
-    -30,-40,-40,-50,-50,-40,-40,-30,
-    -20,-30,-30,-40,-40,-30,-30,-20,
-    -10,-20,-20,-20,-20,-20,-20,-10,
-     20, 20,  0,  0,  0,  0, 20, 20,
-     20, 30, 10,  0,  0, 10, 30, 20,
+     -14,   -3,    0,  -51,  -40,  -49,   -7,  -35,
+     -33,  -14,  -12,  -31,  -18,  -27,  -20,  -21,
+     -29,  -16,    2,   -7,   -6,  -18,  -14,  -26,
+     -13,    5,   13,   24,   20,   18,   16,   -8,
+       4,   27,   47,   51,   62,   51,   30,   10,
+      13,   33,   59,   75,   84,   79,   49,   23,
+      -2,   -6,   37,   40,   54,   60,   44,    6,
+      12,   -1,    6,   25,   46,   41,   25,   16,
 };
 static const int* const kPsqt[6] = { kPsqtPawn, kPsqtKnight, kPsqtBishop, kPsqtRook, kPsqtQueen, kPsqtKing };
 
@@ -172,13 +173,13 @@ static AttackInfo computeAttackInfo(const Board& board, Color side) {
 // Pesos treináveis via texel_tuner (training/texel_tuner/), valores iniciais = 0 até à
 // primeira calibragem -- atualizar manualmente colando o output do tuner aqui.
 struct ThreatWeights {
-    int threatByMinor[6] = {0,0,0,0,0,0};   // indexado por PieceType da peça atacada
-    int threatByRook[6]  = {0,0,0,0,0,0};
-    int threatByKing      = 0;
-    int hanging           = 0;
-    int weakQueenProt     = 0;
-    int restrictedPiece   = 0;
-    int threatBySafePawn  = 0;
+    int threatByMinor[6] = {16,32,20,35,-49,-198};  // indexado por PieceType da peça atacada
+    int threatByRook[6]  = {11,11,29,-12,53,-242};
+    int threatByKing      = 51;
+    int hanging           = 33;
+    int weakQueenProt     = 2;
+    int restrictedPiece   = 5;
+    int threatBySafePawn  = 78;
 };
 static const ThreatWeights kThreatW;
 // Conta os 7 termos para `side` atacando o adversário; devolve a soma já pesada (cp).
@@ -245,23 +246,13 @@ static int staticEval(const Board& board) {
     if (napoleon::nnue::isLoaded()) {
         score = napoleon::nnue::evaluate(board);
     } else {
-        // Material fallback (used when no NNUE net loaded), + um termo de threats
-        // calculado on-the-fly (pedido para diagnóstico: isolar busca vs rede com uma
-        // eval um pouco mais rica que material puro, sem precisar da NNUE). Para cada
-        // peça atacada pelo adversário e NÃO defendida de volta por nós, penaliza uma
-        // fração do valor dela (proxy simples de "pendurada", sem SEE completo).
-        static const int pv[] = { 100, 325, 325, 500, 975, 20000, 0 };
+        // HCE de diagnóstico (sem rede NNUE): PSQT calibrado (já inclui o valor de
+        // material implícito, ver comentário acima das tabelas -- NÃO soma material à
+        // parte, duplicaria) + termos de threats, ambos calibrados juntos via Texel
+        // tuning a partir de posições reais. Convenção do motor: sq=0 é a1 (rank1), a
+        // tabela está escrita com linha 0 = rank8 — por isso brancas leem sq^56
+        // (inverte o rank), pretas leem sq diretamente (simetria especular completa).
         int s = 0;
-        for (int pt = 0; pt < 5; ++pt) {
-            s += board.pieceBB[0][pt].popcount() * pv[pt];
-            s -= board.pieceBB[1][pt].popcount() * pv[pt];
-        }
-        // PSQT clássico (desenvolvimento/centro/segurança do rei) — sem isto, material+
-        // threats dava 0.00 para QUALQUER lance de abertura (nenhuma capture/ameaça
-        // cedo no jogo), levando a lances arbitrários como a2a3 como "melhor" só por
-        // ordem de geração. Convenção do motor: sq=0 é a1 (rank1), a tabela está escrita
-        // com linha 0 = rank8 — por isso brancas leem sq^56 (inverte o rank), pretas
-        // leem sq diretamente (simetria especular completa).
         for (int pt = 0; pt < 6; ++pt) {
             Bitboard wp = board.pieceBB[0][pt];
             while (wp.any()) s += kPsqt[pt][wp.poplsb().value() ^ 56];
