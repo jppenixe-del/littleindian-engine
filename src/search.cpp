@@ -265,6 +265,20 @@ static int staticEval(const Board& board) {
         AttackInfo blackAtk = computeAttackInfo(board, Color::BLACK);
         s += computeThreatScore(board, Color::WHITE, whiteAtk, blackAtk);
         s -= computeThreatScore(board, Color::BLACK, blackAtk, whiteAtk);
+        // 🦅 Reescala global do HCE: o PSQT calibrado tem médias bem menores que
+        // kPieceValue (Dama≈574 vs 975, Cavalo≈182 vs 325 -- fator ~1.5x médio entre
+        // peças). kPieceValue é usado em VÁRIOS sítios da busca somado DIRETAMENTE ao
+        // eval (delta pruning, capture futility) e TODAS as margens de poda fixas (RFP,
+        // NMP, futility de quietos, SE_MARGIN, razoring) foram pensadas/calibradas
+        // implicitamente para a escala "padrão" que kPieceValue representa. Sem
+        // reescalar, estas podas ficam muito menos agressivas com o HCE (o eval "parece"
+        // sempre mais próximo de alfa/beta do que devia), confirmado como causa real de
+        // explosões de nós (depth16→17 do startpos: 2.2M→125M nós, 152s). Multiplicar
+        // aqui em vez de criar tabelas alternativas em cada sítio: corrige TODAS as
+        // margens de uma vez, mantendo o resto do código (SEE, MVV-LVA, kPieceValue)
+        // intocado -- só staticEval() muda de escala.
+        static constexpr double HCE_RESCALE = 1.5;
+        s = (int)(s * HCE_RESCALE);
         score = board.sideToMove() == Color::WHITE ? s : -s;
     }
     // Escala pelo halfmove clock: aproxima a regra dos 50 lances — a eval
@@ -1180,6 +1194,8 @@ static int search(Board& board, int depth, int alpha, int beta,
     int bestScore  = -INF_SCORE;
     Move bestMove  = NULL_MOVE;
     Bound bound    = Bound::UPPER;
+    bool multiCutSignal = false;  // ver bloco do singular extension: para o LOOP de
+                                   // lances depois do lance da TT, não faz return cedo
     int  idx       = 0;
     int  legalCnt  = 0;
     if (root) gRootMoveCount = 0;  // recomeça a contagem por lance desta iteração
@@ -1290,23 +1306,27 @@ static int search(Board& board, int depth, int alpha, int beta,
             } else if (sScore >= beta && std::abs(sScore) < MATE_SCORE - 512) {
                 // Multi-cut: a verificação exclui o lance da TT e AINDA ASSIM bate a beta
                 // exterior — outro lance qualquer já corta aqui, não vale a pena continuar
-                // a testar lances neste nó. Gap vs SF/Reckless (não tínhamos nenhum uso do
-                // resultado da verificação para além de decidir estender ou não).
-                // 🦅 FIX: devolvia sScore em bruto. O Reckless aproxima-o de beta (~40% do
-                // caminho) em vez de devolver o valor cheio — sScore vem duma busca a
-                // profundidade REDUZIDA (singularDepth), por isso é menos fiável que um
-                // valor normal desta profundidade; inflar o corte com o valor bruto
-                // propaga um score otimista de mais para o pai (janelas de aspiração,
-                // outras podas). Mistura para beta, não copia o valor exato deles.
-                return beta + (sScore - beta) * 6 / 10;
-            } else if (ttScore >= beta) {
-                // Extensão negativa: confirmado no código real do Reckless (src/search.rs,
-                // bloco singular) — gate exato é `tt_score >= beta || cut_node`. Não temos
-                // o conceito de "cut_node" (flag de PVS para nós esperados a falhar alto)
-                // distinto de pvNode na nossa busca, por isso só a metade ttScore>=beta —
-                // o lance da TT já "parecia" bom o suficiente para cortar, mas a verificação
-                // mostrou que NÃO é singular (outro lance também chega lá) — desconfia um
-                // pouco deste lance, reduz em vez de assumir que é mesmo o melhor.
+                // a testar MAIS lances neste nó.
+                // 🦅 FIX #2: a 1ª correção (return beta+(sScore-beta)*6/10) ainda fazia um
+                // return ANTECIPADO com um valor vindo duma busca a profundidade REDUZIDA
+                // (singularDepth) -- comparado com o Ethereal real (src/search.c,
+                // singularity()), que NUNCA faz return aqui: só sinaliza ao move picker p/
+                // parar de testar MAIS lances, e deixa o lance da TT prosseguir pela busca
+                // NORMAL (mesma profundidade completa) como faria de qualquer forma. Um
+                // return com valor aproximado a partir duma busca reduzida injeta um score
+                // instável no pai (janelas de aspiração, outras podas) -- confirmado como
+                // causa real duma explosão de nós (depth 16→17: 2.2M→125M nós, 152s) no HCE
+                // de diagnóstico: o HCE tem mais variância entre profundidades que a NNUE,
+                // tornando este corte aproximado MUITO menos fiável. Sem return: o lance da
+                // TT é processado abaixo como qualquer outro, só não testamos os restantes.
+                multiCutSignal = true;
+            } else if (ttScore >= beta || ttScore <= alpha) {
+                // Extensão negativa: gate original era só `ttScore >= beta` (Reckless,
+                // src/search.rs). Confirmado no Ethereal real (src/search.c, singularity())
+                // que TAMBÉM desconfia do lance da TT quando `ttValue <= alpha` (já estava a
+                // falhar baixo) -- adicionado esse segundo caso. O lance da TT "parecia" bom
+                // o suficiente para cortar OU já estava a falhar, mas a verificação mostrou
+                // que NÃO é singular -- desconfia, reduz em vez de assumir que é o melhor.
                 singularExt = -3;
             }
         }
@@ -1467,6 +1487,10 @@ static int search(Board& board, int depth, int alpha, int beta,
                 }
             }
         }
+        // Multi-cut (ver bloco do singular extension acima): o lance da TT já foi
+        // processado normalmente nesta iteração: agora paramos de testar mais lances,
+        // sem ter feito nenhum return antecipado com valor aproximado.
+        if (multiCutSignal) break;
     }
 
     if (legalCnt == 0) {
