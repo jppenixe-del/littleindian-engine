@@ -49,7 +49,16 @@ static bool checkTime(SearchInfo& info) {
         return true;
     }
     if ((info.nodes & 2047) == 0) {
-        if (info.timeLimitMs > 0 && nowMs() >= info.startMs + info.timeLimitMs) {
+        int64_t now = nowMs();
+        if (info.timeLimitMs > 0 && now >= info.startMs + info.timeLimitMs) {
+            info.stopped = true;
+            return true;
+        }
+        // Iteração atual a demorar muito mais que o esperado (explosão real, não
+        // crescimento normal) -- aborta SÓ esta depth, driver descarta e usa o melhor
+        // resultado já conhecido da anterior. Funciona mesmo sem time control (go
+        // infinite/go depth N), onde timeLimitMs acima nem está definido.
+        if (info.iterDeadlineMs > 0 && now >= info.iterDeadlineMs) {
             info.stopped = true;
             return true;
         }
@@ -1947,6 +1956,14 @@ static void searchBody(Board& board, const Limits& limits, bool isMain, uint64_t
         int64_t iterStartMs = nowMs();
         info.stopped = false;
         info.selDepth = 0;  // recomeça a cada iteração (estilo Stockfish: seldepth é por depth, não cumulativo)
+        // Deadline de explosão: 15x o tempo da última iteração (bem mais generoso que o
+        // ITER_GROWTH_GUESS=2.0 usado acima para decidir SE começa -- aqui é só uma rede
+        // de segurança contra explosões reais, não o crescimento normal de ID), com piso
+        // de 2s para não disparar por ruído de medição em profundidades baixas/triviais.
+        static constexpr int64_t ITER_ABORT_FACTOR = 15;
+        info.iterDeadlineMs = (lastIterMs > 0)
+            ? iterStartMs + std::max((int64_t)2000, lastIterMs * ITER_ABORT_FACTOR)
+            : 0;
         gRootExcludedCount = 0;  // MultiPV: recomeça a exclusão a cada depth nova
 
         int score;

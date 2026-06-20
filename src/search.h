@@ -30,6 +30,15 @@ struct SearchInfo {
     int64_t  softLimitMs = 0;  // soft stop (check after root)
     uint64_t nodeLimit  = 0;   // "go nodes N" (0 = sem limite)
     int      selDepth  = 0;    // maior ply visitado nesta iteração (qsearch incluída) — campo UCI "seldepth"
+    // Aborta a iteração ATUAL (não o "go" inteiro) se ela demorar muito mais do que o
+    // padrão de crescimento entre profundidades sugeria -- sinal de explosão real (ex.:
+    // poda a falhar numa posição específica), não crescimento normal de iterative
+    // deepening. Calculado pelo driver antes de cada depth a partir do tempo da
+    // anterior; 0 = sem limite (1ª iteração). checkTime() já descarta a iteração via
+    // "info.stopped && depth>1" no driver -- só falta marcar stopped quando ISTO dispara,
+    // em vez de deixar correr até o hard limit absoluto (ou para sempre, em "go infinite"
+    // /"go depth N" sem time control, onde timeLimitMs nem está definido).
+    int64_t iterDeadlineMs = 0;
 };
 
 // Score constants
