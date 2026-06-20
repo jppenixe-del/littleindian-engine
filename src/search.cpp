@@ -310,6 +310,13 @@ static thread_local int gContHist1[7][64][6][64];  // 1 ply atrás (lance do adv
 static thread_local int gContHist2[7][64][6][64];  // 2 plies atrás (o nosso lance anterior)
 static thread_local int gContPieceAt[130];
 static thread_local int gContToAt[130];
+// Gap vs SF/Reckless: lance jogado para chegar a cada ply, com from/to (gContPieceAt/
+// gContToAt já tinham peça+to, mas não from) — necessário para o bónus de history por
+// diferença de eval entre plies (precisa de atualizar gHistory[lado][from][to] do lance
+// do PAI, não só identificar a peça/casa). Move() guarda from/to/flags num único u16,
+// barato de copiar.
+static thread_local Move gMoveAtPly[130];
+static thread_local bool gMoveWasQuietAtPly[130];
 
 static int contHistScore(int ply, PieceType curPiece, int curTo) {
     int score = 0;
@@ -624,10 +631,8 @@ static int SE_MARGIN    = 64;
 // Gap vs SF/Reckless: o nosso singularExt era binário (0 ou 1). Ambos os motores de
 // referência graduam por quanto a busca de verificação ficou abaixo de singularBeta —
 // mais confiança no lance único, mais se aprofunda (até 3). Constantes próprias, nascem
-// neutras. SÓ a direção "aprofunda mais" foi implementada (não a extensão negativa que
-// os dois também têm) — mesmo motivo do hindsight depth adjustment: não tinha confiança
-// total no sinal/condição exata de quando reduzir, e reduzir errado é mais arriscado do
-// que aprofundar de mais (pior caso aqui é só nps perdido).
+// neutras. Extensão negativa (-3) confirmada e implementada também, lendo o código real
+// do Reckless (ver bloco da busca de verificação) em vez de adivinhar a condição.
 static int SE_DOUBLE_MARGIN = 16;
 static int SE_TRIPLE_MARGIN = 80;
 
@@ -730,17 +735,49 @@ static int search(Board& board, int depth, int alpha, int beta,
     int corrTerm = pawnCorrTerm(board) + nonPawnCorrTerm(board);
     int eval    = rawEval + corrTerm;
 
-    // Hindsight depth adjustment: se o PAI reduziu MUITO a descer até aqui
-    // (gReductionAtPly[ply] >= 3), a redução pode ter sido excessiva — devolve
-    // 1 ply. Versão deliberadamente CONSERVADORA (só esta direção, sem o
-    // "reduz mais 1 ply se a eval melhorou" que o SF/Reckless também têm):
-    // não tinha confiança total no sinal exato da variação de eval que eles
-    // usam (risco real de bug de direção subtil) — esta versão só ADICIONA
-    // esforço de busca nunca remove, por isso o pior caso é só nps perdido,
-    // nunca um corte indevido por profundidade a menos do que devia.
-    if (!root && !inCheck && gReductionAtPly[std::min(ply, 127)] >= 3)
-        ++depth;
+    // Hindsight depth adjustment, AMBAS as direções — confirmado lendo o código real do
+    // Reckless (src/search.rs, bloco "Hindsight reductions") em vez de adivinhar o sinal:
+    //   eval_delta = eval (este nó) + stack[ply-1].eval (pai) -- soma, não subtração,
+    //   porque negamax já inverte o sinal entre plies consecutivos; a soma dá a variação
+    //   "traduzida" para a perspetiva de quem jogou o lance do pai.
+    //   - reduction>=2249 (~2.2 plies nas unidades internas deles) && eval_delta<0 → +1 ply
+    //     (a redução foi grande E a posição piorou mais do que o pai esperava — devolve).
+    //   - reduction>0 (qualquer redução) && eval_delta>57 && !tt_pv && depth>=2 → -1 ply
+    //     (mesmo com pouca/nenhuma redução, a posição melhorou bastante — corta mais).
+    // Constantes próprias (3 plies, 50cp), não copiadas das deles (escala diferente). Sem
+    // "tt_pv" próprio na nossa TT -- uso !pvNode como aproximação razoável.
+    if (!root && !inCheck && ply >= 1) {
+        int pPly = std::min(ply, 127);
+        int priorReduction = gReductionAtPly[pPly];
+        int parentEval = gEvalAtPly[std::min(ply - 1, 127)];
+        int evalDelta = eval + parentEval;
+        if (priorReduction >= 3 && evalDelta < 0)
+            ++depth;
+        else if (!pvNode && depth >= 2 && priorReduction > 0 && evalDelta > 50)
+            --depth;
+    }
     gEvalAtPly[std::min(ply, 127)] = eval;
+
+    // Bónus/malus de history por diferença de eval entre plies — confirmado lendo o
+    // código real do Reckless (src/search.rs): atualiza o history do lance do PAI (não
+    // deste nó) consoante a eval melhorou ou piorou entre o pai e agora. value = K *
+    // -(eval + evalDoPai) -- soma (não subtração) porque negamax já inverte o sinal entre
+    // plies; o resultado fica na perspetiva de quem jogou o lance do pai. Só para lances
+    // quietos do pai, só a profundidades baixas OU sem TT hit (evita reforçar repetido em
+    // posições já bem exploradas — mesmo guard do Reckless). Constantes próprias (K e
+    // clamp), não copiadas das deles (escala diferente).
+    if (!root && !inCheck && ply >= 1 && gMoveWasQuietAtPly[std::min(ply, 127)] && (depth < 6 || !ttHit)) {
+        int pPly = std::min(ply, 127);
+        Move parentMove = gMoveAtPly[pPly];
+        int parentEval = gEvalAtPly[std::min(ply - 1, 127)];
+        int value = -(eval + parentEval);
+        int bonus = std::clamp(value / 2, -150, 300);
+        int moverSide = int(~board.sideToMove());
+        int& h = gHistory[moverSide][parentMove.from()][parentMove.to()];
+        h += bonus;
+        if (h > 16000) h = 16000;
+        if (h < -16000) h = -16000;
+    }
 
     // |corrTerm| como sinal de confiança: quando a correção teve de ajustar muito a eval,
     // a eval estática é menos fiável aqui — alarga as margens de poda (RFP/futility/SEE)
@@ -968,6 +1005,15 @@ static int search(Board& board, int depth, int alpha, int beta,
                 // a testar lances neste nó. Gap vs SF/Reckless (não tínhamos nenhum uso do
                 // resultado da verificação para além de decidir estender ou não).
                 return sScore;
+            } else if (ttScore >= beta) {
+                // Extensão negativa: confirmado no código real do Reckless (src/search.rs,
+                // bloco singular) — gate exato é `tt_score >= beta || cut_node`. Não temos
+                // o conceito de "cut_node" (flag de PVS para nós esperados a falhar alto)
+                // distinto de pvNode na nossa busca, por isso só a metade ttScore>=beta —
+                // o lance da TT já "parecia" bom o suficiente para cortar, mas a verificação
+                // mostrou que NÃO é singular (outro lance também chega lá) — desconfia um
+                // pouco deste lance, reduz em vez de assumir que é mesmo o melhor.
+                singularExt = -3;
             }
         }
 
@@ -987,13 +1033,20 @@ static int search(Board& board, int depth, int alpha, int beta,
         if (ply + 1 < 130) {
             gContPieceAt[ply + 1] = int(board.pieceOn(m.to()));
             gContToAt[ply + 1]    = m.to();
+            gMoveAtPly[ply + 1]      = m;
+            gMoveWasQuietAtPly[ply + 1] = isQuiet;
         }
 
         // Check Extension: lance que dá xeque aprofunda 1 ply (sequências de
         // xeque tendem a ser forçadas/táticas). Limite de ply como rede de
         // segurança — a deteção de empate acima já trata repetição/50 lances.
         const bool givesCheck = board.isInCheck();
-        const int  ext = std::max((givesCheck && ply < 100) ? 1 : 0, singularExt);
+        const int checkExt = (givesCheck && ply < 100) ? 1 : 0;
+        // singularExt agora pode ser negativo (extensão negativa) — std::max descartaria
+        // isso sempre que checkExt=0 (max(0,-3)=0). Quando é positivo continua a tomar-se
+        // o maior dos dois (não duplicar extensão pelo mesmo motivo); quando é negativo,
+        // soma-se (é um sinal independente — reduz mesmo havendo ou não xeque).
+        const int ext = singularExt >= 0 ? std::max(checkExt, singularExt) : checkExt + singularExt;
 
         int score;
         if (legalCnt == 1) {
