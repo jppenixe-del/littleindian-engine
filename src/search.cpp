@@ -175,6 +175,28 @@ static thread_local int gLowPlyHistory[LOW_PLY_MAX][64][64];
 // profundidade da busca iterativa (atualizado entre profundidades).
 static thread_local int gOptimism[2] = {0, 0};
 
+// ─── Threat-aware ordering (gap vs Reckless) ────────────────────────────────
+// Todas as casas atacadas por UM lado (união sobre todas as peças desse lado) — usado
+// para um bónus/malus de ordenação de quietos: lance que ESCAPA de uma casa atacada
+// recebe bónus, lance que entra numa casa atacada (vindo de uma casa segura) recebe
+// malus. Versão mais simples e segura do que reindexar gHistory com bits de ameaça
+// (Reckless faz isso); aqui é só um termo aditivo, sem tocar nas tabelas existentes.
+static Bitboard computeSideAttacks(const Board& board, Color side) {
+    Bitboard occ = board.allOcc;
+    Bitboard atk = (side == Color::WHITE) ? attacks::pawnAttacks<Color::WHITE>(board.pieces(side, PieceType::PAWN))
+                                           : attacks::pawnAttacks<Color::BLACK>(board.pieces(side, PieceType::PAWN));
+    Bitboard bb = board.pieces(side, PieceType::KNIGHT);
+    while (bb.any()) atk |= attacks::knightAttacks(bb.poplsb());
+    bb = board.pieces(side, PieceType::BISHOP);
+    while (bb.any()) atk |= attacks::bishopAttacks(bb.poplsb(), occ);
+    bb = board.pieces(side, PieceType::ROOK);
+    while (bb.any()) atk |= attacks::rookAttacks(bb.poplsb(), occ);
+    bb = board.pieces(side, PieceType::QUEEN);
+    while (bb.any()) { Square qs = bb.poplsb(); atk |= attacks::bishopAttacks(qs, occ) | attacks::rookAttacks(qs, occ); }
+    atk |= attacks::kingAttacks(board.kingSq(side));
+    return atk;
+}
+
 // ─── Static Exchange Evaluation (SEE) ──────────────────────────────────────
 // Todas as peças (ambas as cores) que atacam `sq`, dada uma ocupação
 // arbitrária `occ` (usado para simular peças removidas durante a troca).
@@ -298,8 +320,11 @@ static int contHistScore(int ply, PieceType curPiece, int curTo) {
 // checkSquares[pt] = conjunto de casas-destino a partir das quais uma peça do tipo `pt`
 // (da cor de quem vai jogar) dá xeque direto ao rei adversário — precalculado uma vez
 // por nó, reaproveitado em todos os lances (mesmo padrão do check_squares() do SF).
+// theirAttacks = casas atacadas pelo adversário (gap vs Reckless: bónus de escapar duma
+// casa atacada, malus de entrar numa vindo duma casa segura — versão simples e aditiva,
+// sem reindexar as tabelas de history como o Reckless faz).
 static int moveScore(const Board& board, Move m, Move ttMove, const int killers[2], int ply,
-                      const Bitboard checkSquares[6]) {
+                      const Bitboard checkSquares[6], Bitboard theirAttacks) {
     if (m.data == ttMove.data) return 1000000;
     if (m.isCapture()) {
         PieceType attacker = board.pieceOn(m.from());
@@ -322,6 +347,12 @@ static int moveScore(const Board& board, Move m, Move ttMove, const int killers[
     PieceType movedPt = board.pieceOn(m.from());
     if (movedPt != PieceType::KING && checkSquares[int(movedPt)].test(m.to()) && seeGE(board, m, 0))
         score += 8000;
+    bool fromThreatened = theirAttacks.test(m.from());
+    bool toThreatened    = theirAttacks.test(m.to());
+    if (fromThreatened && !toThreatened)
+        score += 2500;   // escapa duma casa atacada para uma segura
+    else if (!fromThreatened && toThreatened)
+        score -= 2500;   // sai duma casa segura para uma atacada, sem necessidade
     return score;
 }
 
@@ -346,9 +377,10 @@ struct SortedMoves {
             checkSquares[int(PieceType::QUEEN)]  = checkSquares[int(PieceType::BISHOP)] | checkSquares[int(PieceType::ROOK)];
             checkSquares[int(PieceType::KING)]   = Bitboard();
         }
+        Bitboard theirAttacks = computeSideAttacks(board, ~board.sideToMove());
         for (int i = 0; i < count; ++i) {
             moves[i]  = list.moves[i];
-            scores[i] = moveScore(board, list.moves[i], ttMove, killers, ply, checkSquares);
+            scores[i] = moveScore(board, list.moves[i], ttMove, killers, ply, checkSquares, theirAttacks);
         }
     }
 
