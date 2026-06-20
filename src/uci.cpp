@@ -256,8 +256,9 @@ void uci::loop() {
         } else if (cmd == "go") {
             Limits limits;
             std::string tok;
+            bool sawDepth = false;
             while (ss >> tok) {
-                if (tok == "depth")     { ss >> limits.depth; }
+                if (tok == "depth")     { ss >> limits.depth; sawDepth = true; }
                 else if (tok == "movetime") { ss >> limits.movetime; }
                 else if (tok == "wtime")    { ss >> limits.wtime; }
                 else if (tok == "btime")    { ss >> limits.btime; }
@@ -267,6 +268,14 @@ void uci::loop() {
                 else if (tok == "infinite") { limits.infinite = true; limits.depth = 64; }
                 else if (tok == "nodes")    { ss >> limits.nodes; }
             }
+            // "go depth N" sem nenhum controlo de tempo explícito é um pedido
+            // determinístico — tem de chegar à profundidade N, não pode ser cortado
+            // pelo default de 5s (nem pela verificação preventiva de overshoot, que lê
+            // os mesmos limites). Bug real: "go depth 20" estava a parar por volta da
+            // depth 11 num telemóvel mais lento, porque caía no ramo "sem tempo dado"
+            // e ficava sujeito ao limite de 5s como qualquer jogo por relógio.
+            if (sawDepth && limits.movetime == 0 && limits.wtime == 0 && limits.btime == 0)
+                limits.infinite = true;
             search(board, limits);
         } else if (cmd == "stop") {
             // handled via flag in a real engine; for now no-op
