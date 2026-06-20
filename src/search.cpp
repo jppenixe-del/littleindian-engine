@@ -184,6 +184,51 @@ struct ThreatWeights {
     int threatBySafePawn  = 58;
 };
 static const ThreatWeights kThreatW;
+
+// HCE fase 3: Mobility geral -- tipicamente o termo de maior ganho único depois de
+// material+PSQT em HCEs maduros (Ethereal, SF clássico). Para cada peça menor/maior
+// (Knight/Bishop/Rook/Queen -- não Pawn/King, que têm dinâmicas próprias), conta quantas
+// casas da "área de mobilidade" ela ataca: exclui casas com peças PRÓPRIAS e casas
+// atacadas por PEÕES INIMIGOS (consideradas perigosas mesmo vazias, convenção SF/Ethereal
+// clássica). Tamanhos das tabelas = máximo de casas alcançáveis por tipo de peça
+// (Knight≤8, Bishop≤13, Rook≤14, Queen≤27 -- +1 cada p/ incluir o 0).
+struct MobilityWeights {
+    int knight[9]  = {0,0,0,0,0,0,0,0,0};
+    int bishop[14] = {0,0,0,0,0,0,0,0,0,0,0,0,0,0};
+    int rook[15]   = {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0};
+    int queen[28]  = {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0};
+};
+static const MobilityWeights kMobilityW;
+static int computeMobilityScore(const Board& board, Color side, const AttackInfo& them) {
+    Bitboard ownPieces = Bitboard(0ULL);
+    for (int pt = 0; pt < 6; ++pt) ownPieces |= board.pieceBB[int(side)][pt];
+    Bitboard mobilityArea = ~ownPieces & ~them.byPawn;
+    Bitboard occ = board.allOcc;
+    int score = 0;
+    Bitboard bb = board.pieces(side, PieceType::KNIGHT);
+    while (bb.any()) {
+        int cnt = (attacks::knightAttacks(bb.poplsb()) & mobilityArea).popcount();
+        score += kMobilityW.knight[std::min(cnt, 8)];
+    }
+    bb = board.pieces(side, PieceType::BISHOP);
+    while (bb.any()) {
+        int cnt = (attacks::bishopAttacks(bb.poplsb(), occ) & mobilityArea).popcount();
+        score += kMobilityW.bishop[std::min(cnt, 13)];
+    }
+    bb = board.pieces(side, PieceType::ROOK);
+    while (bb.any()) {
+        int cnt = (attacks::rookAttacks(bb.poplsb(), occ) & mobilityArea).popcount();
+        score += kMobilityW.rook[std::min(cnt, 14)];
+    }
+    bb = board.pieces(side, PieceType::QUEEN);
+    while (bb.any()) {
+        Square qs = bb.poplsb();
+        int cnt = ((attacks::bishopAttacks(qs, occ) | attacks::rookAttacks(qs, occ)) & mobilityArea).popcount();
+        score += kMobilityW.queen[std::min(cnt, 27)];
+    }
+    return score;
+}
+
 // Conta os 7 termos para `side` atacando o adversário; devolve a soma já pesada (cp).
 static int computeThreatScore(const Board& board, Color side, const AttackInfo& us, const AttackInfo& them) {
     Color enemy = ~side;
@@ -265,6 +310,8 @@ static int staticEval(const Board& board) {
         AttackInfo blackAtk = computeAttackInfo(board, Color::BLACK);
         s += computeThreatScore(board, Color::WHITE, whiteAtk, blackAtk);
         s -= computeThreatScore(board, Color::BLACK, blackAtk, whiteAtk);
+        s += computeMobilityScore(board, Color::WHITE, blackAtk);
+        s -= computeMobilityScore(board, Color::BLACK, whiteAtk);
         // 🦅 Reescala global do HCE: o PSQT calibrado tem médias bem menores que
         // kPieceValue (Dama≈574 vs 975, Cavalo≈182 vs 325 -- fator ~1.5x médio entre
         // peças). kPieceValue é usado em VÁRIOS sítios da busca somado DIRETAMENTE ao
