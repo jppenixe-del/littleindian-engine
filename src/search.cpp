@@ -240,6 +240,63 @@ struct KingSafetyWeights {
     Score pawnShieldMissing[4] = {};  // indexado por nº de casas do escudo SEM peão próprio (0..3)
 };
 static const KingSafetyWeights kKingSafetyW;
+
+// HCE fase 6: Pawn Structure -- peões passados (bónus crescente por rank, mais valioso
+// perto da promoção), isolados (sem peões próprios nas colunas adjacentes, qualquer
+// rank) e dobrados (2+ peões próprios na mesma coluna). Backward pawn fica de fora por
+// agora (mais complexo de definir corretamente -- precisa de saber se a casa de avanço
+// está controlada pelo inimigo E se nenhum peão adjacente já avançou).
+struct PawnStructureWeights {
+    Score passed[8]   = {};  // indexado pela rank do peão (relativa à perspetiva, 0=própria 1ª fileira)
+    Score isolated    = {};
+    Score doubled     = {};
+};
+static const PawnStructureWeights kPawnStructW;
+static Score computePawnStructureScore(const Board& board, Color side) {
+    Bitboard ownPawns = board.pieces(side, PieceType::PAWN);
+    Bitboard enemyPawns = board.pieces(~side, PieceType::PAWN);
+    Score score;
+    Bitboard bb = ownPawns;
+    while (bb.any()) {
+        Square sq = bb.poplsb();
+        int file = sq.file(), rank = sq.rank();
+
+        // Doubled: outro peão próprio na MESMA coluna.
+        bool doubledHere = false;
+        for (int r = 0; r < 8; ++r) {
+            if (r == rank) continue;
+            if (ownPawns.test(Square((r << 3) | file).value())) { doubledHere = true; break; }
+        }
+        if (doubledHere) score += kPawnStructW.doubled;
+
+        // Isolated: nenhum peão próprio nas colunas adjacentes (qualquer rank).
+        bool hasNeighbor = false;
+        for (int df = -1; df <= 1; df += 2) {
+            int f = file + df;
+            if (f < 0 || f > 7) continue;
+            for (int r = 0; r < 8 && !hasNeighbor; ++r)
+                if (ownPawns.test(Square((r << 3) | f).value())) hasNeighbor = true;
+        }
+        if (!hasNeighbor) score += kPawnStructW.isolated;
+
+        // Passed: nenhum peão inimigo nas colunas [file-1,file,file+1], em qualquer rank
+        // "à frente" deste peão (rank maior para brancas, menor para pretas).
+        bool passed = true;
+        for (int df = -1; df <= 1 && passed; ++df) {
+            int f = file + df;
+            if (f < 0 || f > 7) continue;
+            int rStart = (side == Color::WHITE) ? rank + 1 : 0;
+            int rEnd   = (side == Color::WHITE) ? 8 : rank;
+            for (int r = rStart; r < rEnd; ++r)
+                if (enemyPawns.test(Square((r << 3) | f).value())) { passed = false; break; }
+        }
+        if (passed) {
+            int relRank = (side == Color::WHITE) ? rank : 7 - rank;
+            score += kPawnStructW.passed[relRank];
+        }
+    }
+    return score;
+}
 // Pesos por tipo de peça atacante (não treináveis -- são só a PONDERAÇÃO usada para somar
 // "unidades de ataque" antes de indexar a tabela; o ganho/perigo REAL fica todo nos pesos
 // treináveis kKingSafetyW.attackUnits[]). Convenção clássica SF: dama pesa mais que torre,
@@ -390,6 +447,8 @@ static int staticEval(const Board& board) {
         s -= computeMobilityScore(board, Color::BLACK, whiteAtk);
         s += computeKingSafetyScore(board, Color::WHITE, blackAtk);
         s -= computeKingSafetyScore(board, Color::BLACK, whiteAtk);
+        s += computePawnStructureScore(board, Color::WHITE);
+        s -= computePawnStructureScore(board, Color::BLACK);
         // Interpolação MG/EG pela fase do jogo (material restante) -- ver gamePhase().
         int phase = gamePhase(board);
         int sTapered = (s.mg * phase + s.eg * (MAX_PHASE - phase)) / MAX_PHASE;
