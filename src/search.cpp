@@ -160,6 +160,14 @@ static int DELTA_MARGIN = 352;  // Coda QS_DELTA_MARGIN (OUTPUT_SCALE_CP=400 now
 static thread_local int gHistory[2][64][64];
 static thread_local int gCaptureHistory[2][6][6];   // [lado][atacante][vítima] — bónus/malus de capturas
 
+// ─── Low-ply history ─────────────────────────────────────────────────────
+// Gap vs SF: tabela ADICIONAL de history só para os primeiros plies (perto da raiz),
+// somada ao history normal — sinal extra de ordenação onde mais conta (decisões perto
+// da raiz afetam a árvore inteira). Influência decai com 1/(1+ply): forte em ply=0,
+// fraca perto do limite LOW_PLY_MAX. Mesmo esquema de bónus/malus do gHistory normal.
+static constexpr int LOW_PLY_MAX = 8;
+static thread_local int gLowPlyHistory[LOW_PLY_MAX][64][64];
+
 // ─── Material/Score Optimism ────────────────────────────────────────────
 // Enviesa a eval a favor de quem está a ganhar na tendência da busca
 // (média do score entre profundidades) — incentiva a pressionar vantagem,
@@ -308,6 +316,8 @@ static int moveScore(const Board& board, Move m, Move ttMove, const int killers[
     if (m.data == killers[1]) return 17000;
     int score = gHistory[int(board.sideToMove())][m.from()][m.to()]
               + contHistScore(ply, board.pieceOn(m.from()), m.to());
+    if (ply < LOW_PLY_MAX)
+        score += gLowPlyHistory[ply][m.from()][m.to()] / (1 + ply);
     score = std::min(score, 16500);  // mantém-se sempre abaixo dos killers
     PieceType movedPt = board.pieceOn(m.from());
     if (movedPt != PieceType::KING && checkSquares[int(movedPt)].test(m.to()) && seeGE(board, m, 0))
@@ -1015,6 +1025,12 @@ static int search(Board& board, int depth, int alpha, int beta,
                         h += depth * depth;
                         if (h > 16000) h = 16000;
 
+                        if (ply < LOW_PLY_MAX) {
+                            int& hlp = gLowPlyHistory[ply][m.from()][m.to()];
+                            hlp += depth * depth;
+                            if (hlp > 16000) hlp = 16000;
+                        }
+
                         // (m.to() já não tem a peça lá — o tabuleiro já foi
                         // desfeito acima; usa-se o valor guardado ao entrar
                         // no lance, que ainda é válido para este m.)
@@ -1038,6 +1054,11 @@ static int search(Board& board, int depth, int alpha, int beta,
                             int& hq = gHistory[int(board.sideToMove())][qm.from()][qm.to()];
                             hq -= depth * depth;
                             if (hq < -16000) hq = -16000;
+                            if (ply < LOW_PLY_MAX) {
+                                int& hqlp = gLowPlyHistory[ply][qm.from()][qm.to()];
+                                hqlp -= depth * depth;
+                                if (hqlp < -16000) hqlp = -16000;
+                            }
                         }
                     }
                     bound = Bound::LOWER;
