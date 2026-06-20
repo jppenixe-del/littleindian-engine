@@ -1098,11 +1098,21 @@ static int search(Board& board, int depth, int alpha, int beta,
         // segurança — a deteção de empate acima já trata repetição/50 lances.
         const bool givesCheck = board.isInCheck();
         const int checkExt = (givesCheck && ply < 100) ? 1 : 0;
-        // singularExt agora pode ser negativo (extensão negativa) — std::max descartaria
-        // isso sempre que checkExt=0 (max(0,-3)=0). Quando é positivo continua a tomar-se
-        // o maior dos dois (não duplicar extensão pelo mesmo motivo); quando é negativo,
-        // soma-se (é um sinal independente — reduz mesmo havendo ou não xeque).
-        const int ext = singularExt >= 0 ? std::max(checkExt, singularExt) : checkExt + singularExt;
+        // 🦅 FIX (bug real encontrado depois do SPRT negativo do bloco7): a versão
+        // anterior somava checkExt+singularExt sempre que singularExt era negativo — um
+        // lance que dá xeque (checkExt=+1) e É TAMBÉM o lance da TT com extensão negativa
+        // do singular (-3) ficava com ext=1-3=-2, REDUZINDO em vez de estender um xeque.
+        // Xeque é um sinal de segurança táctica imediata — nunca deve ser anulado por um
+        // sinal sobre OUTRA coisa (quão "único" é o lance da TT). Agora: havendo xeque,
+        // a extensão negativa só pode reduzir a partir do check extension, nunca abaixo
+        // dele NEM anulá-lo; sem xeque, comporta-se como antes.
+        int ext;
+        if (singularExt >= 0)
+            ext = std::max(checkExt, singularExt);          // comportamento original, sem mudanças
+        else if (checkExt > 0)
+            ext = checkExt;                                  // xeque protegido — ignora a negativa
+        else
+            ext = singularExt;                                // sem xeque, a negativa aplica-se normalmente
 
         int score;
         if (legalCnt == 1) {
