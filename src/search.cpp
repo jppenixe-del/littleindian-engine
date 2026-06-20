@@ -1392,6 +1392,11 @@ static void searchBody(Board& board, const Limits& limits, bool isMain, uint64_t
         lastIterMs = nowMs() - iterStartMs;
         if (!limits.infinite && effectiveSoft > 0
             && nowMs() - info.startMs >= effectiveSoft) break;
+        // Lance único na raiz: gap vs SF — não há decisão nenhuma a tomar (o lance é
+        // forçado), continuar a aprofundar só gasta o tempo do relógio sem mudar o
+        // resultado. Ainda corre 1 iteração completa (info/PV normais), só evita as
+        // restantes.
+        if (!limits.infinite && gRootMoveCount == 1) break;
     }
     (void)0;  // suppress unused warning
 
