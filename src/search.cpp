@@ -2149,7 +2149,18 @@ static void searchBody(Board& board, const Limits& limits, bool isMain, uint64_t
     // antigo (plyResolve), sempre correto independentemente do board atual.
     napoleon::nnue::napkSetCurrentSlot(nullptr);
 
-    // Output best move
+    // Output best move. Salvaguarda absoluta: bestMove pode ficar nulo se a 1ª iteração
+    // for interrompida antes de processar qualquer lance e a TT também não tiver nada
+    // (motor recém-arrancado, sem histórico) -- "bestmove 0000" é inválido em protocolo
+    // UCI e seria uma derrota/erro imediato em jogo real. NUNCA envia 0000 se houver
+    // pelo menos um lance legal: usa o primeiro disponível.
+    if (bestMove.isNull()) {
+        MoveList fallbackList;
+        generateMoves(board, fallbackList);
+        for (int i = 0; i < fallbackList.count; ++i) {
+            if (board.isLegal(fallbackList.moves[i])) { bestMove = fallbackList.moves[i]; break; }
+        }
+    }
     char mv[8] = "0000";
     if (!bestMove.isNull()) {
         mv[0] = 'a' + (bestMove.from() & 7);
