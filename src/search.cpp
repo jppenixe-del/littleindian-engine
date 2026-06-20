@@ -57,18 +57,40 @@ static bool checkTime(SearchInfo& info) {
     return false;
 }
 
+// Declarada mais abaixo (junto às outras funções de ataque/SEE); forward só p/ o
+// fallback material+threats de staticEval poder reutilizá-la sem reordenar o ficheiro.
+static Bitboard computeSideAttacks(const Board& board, Color side);
+
 // ─── Eval ─────────────────────────────────────────────────────────────────
 static int staticEval(const Board& board) {
     int score;
     if (napoleon::nnue::isLoaded()) {
         score = napoleon::nnue::evaluate(board);
     } else {
-        // Material fallback (used when no NNUE net loaded)
+        // Material fallback (used when no NNUE net loaded), + um termo de threats
+        // calculado on-the-fly (pedido para diagnóstico: isolar busca vs rede com uma
+        // eval um pouco mais rica que material puro, sem precisar da NNUE). Para cada
+        // peça atacada pelo adversário e NÃO defendida de volta por nós, penaliza uma
+        // fração do valor dela (proxy simples de "pendurada", sem SEE completo).
         static const int pv[] = { 100, 325, 325, 500, 975, 20000, 0 };
         int s = 0;
         for (int pt = 0; pt < 5; ++pt) {
             s += board.pieceBB[0][pt].popcount() * pv[pt];
             s -= board.pieceBB[1][pt].popcount() * pv[pt];
+        }
+        Bitboard whiteAttacks = computeSideAttacks(board, Color::WHITE);
+        Bitboard blackAttacks = computeSideAttacks(board, Color::BLACK);
+        for (int pt = 0; pt < 5; ++pt) {
+            Bitboard whitePieces = board.pieceBB[0][pt];
+            while (whitePieces.any()) {
+                int sq = whitePieces.poplsb().value();
+                if (blackAttacks.test(sq) && !whiteAttacks.test(sq)) s -= pv[pt] / 8;
+            }
+            Bitboard blackPieces = board.pieceBB[1][pt];
+            while (blackPieces.any()) {
+                int sq = blackPieces.poplsb().value();
+                if (whiteAttacks.test(sq) && !blackAttacks.test(sq)) s += pv[pt] / 8;
+            }
         }
         score = board.sideToMove() == Color::WHITE ? s : -s;
     }
