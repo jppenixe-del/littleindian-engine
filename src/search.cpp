@@ -252,7 +252,15 @@ static const MobilityWeights kMobilityW;
 // Separadamente, penaliza falta de peões-escudo nas 3 casas em frente ao rei (roque
 // destruído/exposto).
 struct KingSafetyWeights {
-    Score attackUnits[50] = {{17,-25},{30,18},{14,-7},{19,17},{21,-2},{23,0},{9,7},{13,-2},{12,-9},{17,-25},{26,-5},{10,-9},{24,-41},{-13,-22},{-5,-42},{19,-57},{-3,-41},{-7,-63},{-12,-63},{-20,-85},{-50,-4},{-57,-15},{-53,-41},{-55,-56},{-58,-48},{-21,-54},{-116,15},{-60,-23},{-123,8},{-127,7},{-127,19},{-128,31},{-210,149},{-235,233},{-964,990},{-725,865},{-405,514},{-1125,1328},{-522,758},{-393,501},{-1354,2198},{-293,577},{-158,247},{-150,135},{-46,171},{-74,15},{-47,29},{-42,12},{-27,-7},{-12,26}};
+    // 🦅 FIX: índices 33-40 (muitas "unidades de ataque" simultâneas, RARO no dataset --
+    // posições com 6+ peças a atacar a king ring ao mesmo tempo) saíam do treino com
+    // valores absurdos ({-1354,2198} no índice 40!), comparados com vizinhos estáveis
+    // ({-210,149} no 32, {-293,577} no 41) -- ruído de poucos dados nesses buckets, não
+    // sinal real. Esses saltos bruscos entre índices ADJACENTES quebram a suavidade que
+    // RFP/NMP/etc precisam para podar bem, causando uma explosão real de nós (depth12
+    // >15x depth11 numa posição encontrada na validação). Suavizado por interpolação
+    // linear entre os pontos estáveis vizinhos (32 e 41) + cap em ±300mg/±400eg.
+    Score attackUnits[50] = {{17,-25},{30,18},{14,-7},{19,17},{21,-2},{23,0},{9,7},{13,-2},{12,-9},{17,-25},{26,-5},{10,-9},{24,-41},{-13,-22},{-5,-42},{19,-57},{-3,-41},{-7,-63},{-12,-63},{-20,-85},{-50,-4},{-57,-15},{-53,-41},{-55,-56},{-58,-48},{-21,-54},{-116,15},{-60,-23},{-123,8},{-127,7},{-127,19},{-128,31},{-210,149},{-219,197},{-228,244},{-238,292},{-247,339},{-256,387},{-265,400},{-275,400},{-284,400},{-293,400},{-158,247},{-150,135},{-46,171},{-74,15},{-47,29},{-42,12},{-27,-7},{-12,26}};
     Score pawnShieldMissing[4] = {{15,-12},{5,-4},{-7,0},{-14,4}};
     // 🦅 Safe check detection (Ethereal real, src/evaluate.c): distingue "muitos
     // atacantes sem entrada" de "rede de mate disponível" -- conta, por tipo de peça
