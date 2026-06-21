@@ -316,6 +316,39 @@ struct RookWeights {
 static const RookWeights kRookW;
 
 static Score kTempoBonus = {91,71};  // bónus por ser a vez de jogar -- par mg/eg, ver uso em staticEval()
+
+// 🦅 Máscaras de bitboard O(1) para substituir os loops O(8)/O(64) explícitos das funções
+// de pawn structure/outpost/rook abaixo -- encontrado em produção que o HCE tinha caído
+// de ~500-700k NPS para ~300k NPS depois de adicionar Bishop/Outpost/Rook/Backward (todos
+// com loops por casa em C++ simples), custando profundidade de busca real em jogo (gauntlet
+// vs Stockfish mostrou littleindian a depth 6-10 enquanto SF Skill0 chegava a depth 10-17
+// no mesmo tempo) -- mais que anulando o ganho de qualidade da avaliação mais rica.
+static inline Bitboard fileMaskBB(int file) { return Bitboard(0x0101010101010101ULL << file); }
+static inline Bitboard adjacentFilesMaskBB(int file) {
+    uint64_t m = 0;
+    if (file > 0) m |= 0x0101010101010101ULL << (file - 1);
+    if (file < 7) m |= 0x0101010101010101ULL << (file + 1);
+    return Bitboard(m);
+}
+// Casas nas colunas [file-1,file,file+1] com rank "à frente" (>rank p/ brancas, <rank p/
+// pretas) -- usada por passed/candidate. Casas "atrás ou na mesma rank" (inclusive) nas
+// mesmas 3 colunas -- usada por backward (procurar vizinhos que já avançaram menos).
+static inline Bitboard threeFileMaskBB(int file) {
+    return fileMaskBB(file) | adjacentFilesMaskBB(file);
+}
+static inline Bitboard frontSpanBB(Color side, int file, int rank) {
+    uint64_t rankMask = (side == Color::WHITE)
+        ? (rank >= 7 ? 0ULL : (~0ULL << ((rank + 1) * 8)))
+        : (rank <= 0 ? 0ULL : (~0ULL >> (64 - rank * 8)));
+    return Bitboard(threeFileMaskBB(file).value() & rankMask);
+}
+static inline Bitboard backOrSameSpanBB(Color side, int file, int rank) {
+    uint64_t rankMask = (side == Color::WHITE)
+        ? (~0ULL >> (64 - (rank + 1) * 8))
+        : (rank >= 7 ? ~0ULL : (~0ULL << (rank * 8)));
+    return Bitboard(threeFileMaskBB(file).value() & rankMask);
+}
+
 static Score computePawnStructureScore(const Board& board, Color side) {
     Bitboard ownPawns = board.pieces(side, PieceType::PAWN);
     Bitboard enemyPawns = board.pieces(~side, PieceType::PAWN);
@@ -327,46 +360,25 @@ static Score computePawnStructureScore(const Board& board, Color side) {
     while (bb.any()) {
         Square sq = bb.poplsb();
         int file = sq.file(), rank = sq.rank();
+        Bitboard ownPawnsHere = ownPawns & ~Bitboard::fromSquare(sq);
 
         // Doubled: outro peão próprio na MESMA coluna.
-        bool doubledHere = false;
-        for (int r = 0; r < 8; ++r) {
-            if (r == rank) continue;
-            if (ownPawns.test(Square((r << 3) | file).value())) { doubledHere = true; break; }
-        }
+        bool doubledHere = (ownPawnsHere & fileMaskBB(file)).any();
         if (doubledHere) score += kPawnStructW.doubled;
 
         // Isolated: nenhum peão próprio nas colunas adjacentes (qualquer rank).
-        bool hasNeighbor = false;
-        for (int df = -1; df <= 1; df += 2) {
-            int f = file + df;
-            if (f < 0 || f > 7) continue;
-            for (int r = 0; r < 8 && !hasNeighbor; ++r)
-                if (ownPawns.test(Square((r << 3) | f).value())) hasNeighbor = true;
-        }
+        bool hasNeighbor = (ownPawns & adjacentFilesMaskBB(file)).any();
         if (!hasNeighbor) score += kPawnStructW.isolated;
 
         // Backward: tem vizinhos (não isolado), mas nenhum peão próprio nas colunas
         // [file-1,file,file+1] está "atrás" dele (mesma rank ou mais atrás) -- é o mais
         // atrasado do grupo -- E a casa de avanço imediata é atacada por peão inimigo.
         if (hasNeighbor) {
-            bool mostBackward = true;
-            for (int df = -1; df <= 1 && mostBackward; ++df) {
-                int f = file + df;
-                if (f < 0 || f > 7) continue;
-                int rStart = (side == Color::WHITE) ? 0 : rank;
-                int rEnd   = (side == Color::WHITE) ? rank : 8;
-                for (int r = rStart; r < rEnd; ++r) {
-                    if (df == 0 && r == rank) continue;
-                    if (ownPawns.test(Square((r << 3) | f).value())) { mostBackward = false; break; }
-                }
-            }
+            bool mostBackward = (ownPawnsHere & backOrSameSpanBB(side, file, rank)).empty();
             if (mostBackward) {
                 int advRank = (side == Color::WHITE) ? rank + 1 : rank - 1;
                 bool advanceAttacked = false;
                 if (advRank >= 0 && advRank < 8) {
-                    // Casa de avanço atacada por peão inimigo: testa diretamente as duas
-                    // diagonais de captura inimigas que apontam para essa casa.
                     int ef = file - 1, ef2 = file + 1;
                     int enemyRank = (side == Color::WHITE) ? advRank - 1 : advRank + 1;
                     if (enemyRank >= 0 && enemyRank < 8) {
@@ -380,23 +392,10 @@ static Score computePawnStructureScore(const Board& board, Color side) {
 
         // Passed: nenhum peão inimigo nas colunas [file-1,file,file+1], em qualquer rank
         // "à frente" deste peão (rank maior para brancas, menor para pretas).
-        bool passed = true;
-        bool ownFileBlocked = false;
-        // 🦅 FIX: o "&& passed" aqui cortava o loop a meio quando df=-1 já marcava
-        // passed=false, NUNCA chegando a df=0 -- ownFileBlocked ficava sempre false
-        // mesmo quando a própria coluna TINHA um bloqueador (confirmado divergente do
-        // Rust tuner, que não tem este early-exit, via revisão estrutural do Opus).
-        for (int df = -1; df <= 1; ++df) {
-            int f = file + df;
-            if (f < 0 || f > 7) continue;
-            int rStart = (side == Color::WHITE) ? rank + 1 : 0;
-            int rEnd   = (side == Color::WHITE) ? 8 : rank;
-            for (int r = rStart; r < rEnd; ++r)
-                if (enemyPawns.test(Square((r << 3) | f).value())) {
-                    passed = false;
-                    if (df == 0) ownFileBlocked = true;
-                }
-        }
+        Bitboard front = frontSpanBB(side, file, rank);
+        Bitboard blockers = enemyPawns & front;
+        bool passed = blockers.empty();
+        bool ownFileBlocked = (enemyPawns & fileMaskBB(file) & front).any();
         if (passed) {
             int relRank = (side == Color::WHITE) ? rank : 7 - rank;
             score += kPawnStructW.passed[relRank];
@@ -463,16 +462,8 @@ static Score computeOutpostScore(const Board& board, Color side, const AttackInf
         int relRank = (side == Color::WHITE) ? sq.rank() : 7 - sq.rank();
         if (relRank < 3 || relRank > 5) return false;
         if (!us.byPawn.test(sq.value())) return false;  // defendido por peão próprio
-        int file = sq.file(), rank = sq.rank();
-        for (int df = -1; df <= 1; df += 2) {
-            int f = file + df;
-            if (f < 0 || f > 7) continue;
-            int rStart = (side == Color::WHITE) ? rank + 1 : 0;
-            int rEnd   = (side == Color::WHITE) ? 8 : rank;
-            for (int r = rStart; r < rEnd; ++r)
-                if (enemyPawns.test(Square((r << 3) | f).value())) return false;
-        }
-        return true;
+        Bitboard front = frontSpanBB(side, sq.file(), sq.rank()) & adjacentFilesMaskBB(sq.file());
+        return (enemyPawns & front).empty();
     };
     Bitboard bb = board.pieces(side, PieceType::KNIGHT);
     while (bb.any()) { Square sq = bb.poplsb(); if (isOutpost(sq)) score += kOutpostW.knight; }
@@ -493,11 +484,9 @@ static Score computeRookScore(const Board& board, Color side) {
     while (bb.any()) {
         Square sq = bb.poplsb();
         int file = sq.file(), rank = sq.rank();
-        bool ownOnFile = false, enemyOnFile = false;
-        for (int r = 0; r < 8; ++r) {
-            if (ownPawns.test(Square((r << 3) | file).value())) ownOnFile = true;
-            if (enemyPawns.test(Square((r << 3) | file).value())) enemyOnFile = true;
-        }
+        Bitboard fm = fileMaskBB(file);
+        bool ownOnFile = (ownPawns & fm).any();
+        bool enemyOnFile = (enemyPawns & fm).any();
         if (!ownOnFile && !enemyOnFile) score += kRookW.openFile;
         else if (!ownOnFile && enemyOnFile) score += kRookW.semiOpenFile;
         int relRank = (side == Color::WHITE) ? rank : 7 - rank;
