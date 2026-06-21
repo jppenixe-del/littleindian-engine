@@ -315,7 +315,14 @@ struct RookWeights {
 };
 static const RookWeights kRookW;
 
-static Score kTempoBonus = {91,71};  // bónus por ser a vez de jogar -- par mg/eg, ver uso em staticEval()
+// 🦅 FIX: o valor calibrado (91,71) saía da MESMA anomalia de correlação espúria
+// fase/decisividade encontrada nos outros termos (commits a5a01b5/d16ba3a) -- "ter a vez
+// de jogar" tende a correlacionar com posições de abertura nos dados de treino, inflando
+// o tempo bonus para uma escala que rivaliza com o valor de UM PEÃO (confirmado: numa
+// posição com 1 peão de diferença, o lado que tinha a vez SUPERAVA largamente o lado com
+// mais material, só pelo tempo). Motores reais usam tipicamente 10-20cp. Reduzido para um
+// valor seguro em vez de tentar recalibrar isto isoladamente.
+static Score kTempoBonus = {15,10};
 
 // 🦅 Máscaras de bitboard O(1) para substituir os loops O(8)/O(64) explícitos das funções
 // de pawn structure/outpost/rook abaixo -- encontrado em produção que o HCE tinha caído
