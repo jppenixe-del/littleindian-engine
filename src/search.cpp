@@ -254,6 +254,11 @@ static const MobilityWeights kMobilityW;
 struct KingSafetyWeights {
     Score attackUnits[50] = {};  // indexado por "unidades de ataque" acumuladas (capadas)
     Score pawnShieldMissing[4] = {};  // indexado por nº de casas do escudo SEM peão próprio (0..3)
+    // 🦅 Safe check detection (Ethereal real, src/evaluate.c): distingue "muitos
+    // atacantes sem entrada" de "rede de mate disponível" -- conta, por tipo de peça
+    // inimiga, quantas casas de onde ela DARIA XEQUE ao nosso rei estão "safe" para ela
+    // (atacada pelo inimigo, não suficientemente defendida por nós).
+    Score safeCheck[4] = {};  // queen, rook, bishop, knight (ordem fixa)
 };
 static const KingSafetyWeights kKingSafetyW;
 
@@ -493,7 +498,7 @@ static Score computeRookScore(const Board& board, Color side) {
 // treináveis kKingSafetyW.attackUnits[]). Convenção clássica SF: dama pesa mais que torre,
 // que pesa mais que menor.
 static constexpr int kKingAttackWeight[6] = { 0, 2, 2, 3, 5, 0 };  // pawn,knight,bishop,rook,queen,king
-static Score computeKingSafetyScore(const Board& board, Color side, const AttackInfo& them) {
+static Score computeKingSafetyScore(const Board& board, Color side, const AttackInfo& us, const AttackInfo& them) {
     Square ksq = board.kingSq(side);
     Bitboard ring = attacks::kingAttacks(ksq) | Bitboard::fromSquare(ksq);
     int units = 0;
@@ -519,6 +524,21 @@ static Score computeKingSafetyScore(const Board& board, Color side, const Attack
         }
     }
     score += kKingSafetyW.pawnShieldMissing[std::min(missing, 3)];
+
+    // Safe check: casas de onde uma peça inimiga do tipo X DARIA XEQUE ao nosso rei
+    // (ataque simétrico a partir da posição do rei), que essa peça realmente alcança, E
+    // que são "safe" para o inimigo (não defendidas por nós, ou defendidas só por uma
+    // peça mas atacadas 2x pelo inimigo -- mesma ideia do "weak" em computeThreatScore).
+    Bitboard occ = board.allOcc;
+    Bitboard safeForThem = ~us.all | them.all2;
+    Bitboard queenChecks  = (attacks::bishopAttacks(ksq, occ) | attacks::rookAttacks(ksq, occ)) & them.byQueen & safeForThem;
+    Bitboard rookChecks   = attacks::rookAttacks(ksq, occ) & them.byRook & safeForThem;
+    Bitboard bishopChecks = attacks::bishopAttacks(ksq, occ) & them.byBishop & safeForThem;
+    Bitboard knightChecks = attacks::knightAttacks(ksq) & them.byKnight & safeForThem;
+    score += kKingSafetyW.safeCheck[0] * queenChecks.popcount();
+    score += kKingSafetyW.safeCheck[1] * rookChecks.popcount();
+    score += kKingSafetyW.safeCheck[2] * bishopChecks.popcount();
+    score += kKingSafetyW.safeCheck[3] * knightChecks.popcount();
     return score;
 }
 static Score computeMobilityScore(const Board& board, Color side, const AttackInfo& them) {
@@ -720,8 +740,8 @@ static int staticEval(const Board& board) {
         s -= computeThreatScore(board, Color::BLACK, blackAtk, whiteAtk);
         s += computeMobilityScore(board, Color::WHITE, blackAtk);
         s -= computeMobilityScore(board, Color::BLACK, whiteAtk);
-        s += computeKingSafetyScore(board, Color::WHITE, blackAtk);
-        s -= computeKingSafetyScore(board, Color::BLACK, whiteAtk);
+        s += computeKingSafetyScore(board, Color::WHITE, whiteAtk, blackAtk);
+        s -= computeKingSafetyScore(board, Color::BLACK, blackAtk, whiteAtk);
         s += computePawnStructureScore(board, Color::WHITE);
         s -= computePawnStructureScore(board, Color::BLACK);
         s += computeWeakQueenScore(board, Color::WHITE);
