@@ -109,64 +109,64 @@ static int gamePhase(const Board& board) {
 // parte, só estas tabelas + os termos de threats (também calibrados juntos).
 // Tabelas da perspetiva das BRANCAS (a8=0 .. h1=63); pretas leem espelhado (sq^56).
 static const Score kPsqtPawn[64] = {
-    {0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},
-    {98,98},{100,100},{75,75},{65,65},{83,83},{106,106},{113,113},{90,90},
-    {95,95},{95,95},{79,79},{63,63},{83,83},{94,94},{104,104},{81,81},
-    {94,94},{99,99},{100,100},{91,91},{98,98},{84,84},{106,106},{81,81},
-    {105,105},{114,114},{91,91},{84,84},{105,105},{108,108},{109,109},{101,101},
-    {146,146},{154,154},{140,140},{143,143},{135,135},{122,122},{132,132},{141,141},
-    {222,222},{215,215},{216,216},{200,200},{204,204},{177,177},{187,187},{193,193},
-    {0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},
+    {0,0}, {0,0}, {0,0}, {0,0}, {0,0}, {0,0}, {0,0}, {0,0},
+    {59,161}, {64,152}, {46,158}, {47,172}, {61,152}, {84,142}, {91,130}, {64,125},
+    {75,136}, {67,139}, {66,134}, {57,117}, {76,121}, {89,131}, {93,119}, {73,106},
+    {71,146}, {66,147}, {94,124}, {91,104}, {97,117}, {97,105}, {89,132}, {69,117},
+    {89,149}, {99,151}, {95,136}, {102,116}, {106,132}, {134,130}, {96,135}, {102,129},
+    {95,180}, {94,193}, {106,165}, {122,140}, {135,136}, {144,139}, {105,154}, {147,148},
+    {30,129}, {-11,143}, {69,112}, {66,90}, {62,100}, {-1,96}, {-11,113}, {31,96},
+    {0,0}, {0,0}, {0,0}, {0,0}, {0,0}, {0,0}, {0,0}, {0,0},
 };
 static const Score kPsqtKnight[64] = {
-    {145,145},{150,150},{141,141},{152,152},{134,134},{130,130},{148,148},{137,137},
-    {134,134},{142,142},{145,145},{156,156},{168,168},{159,159},{143,143},{129,129},
-    {143,143},{170,170},{178,178},{185,185},{183,183},{184,184},{180,180},{147,147},
-    {175,175},{188,188},{194,194},{198,198},{194,194},{202,202},{189,189},{176,176},
-    {184,184},{202,202},{202,202},{209,209},{203,203},{214,214},{208,208},{207,207},
-    {191,191},{210,210},{195,195},{223,223},{206,206},{234,234},{215,215},{219,219},
-    {172,172},{184,184},{223,223},{202,202},{239,239},{219,219},{204,204},{197,197},
-    {142,142},{192,192},{184,184},{183,183},{229,229},{189,189},{208,208},{138,138},
+    {-16,74}, {-23,84}, {-28,89}, {-11,105}, {-21,86}, {-21,62}, {-38,104}, {-62,116},
+    {-40,99}, {-23,86}, {-18,78}, {9,76}, {22,77}, {-9,86}, {-25,91}, {-19,69},
+    {-25,89}, {19,81}, {8,106}, {19,107}, {26,95}, {19,98}, {31,80}, {-20,103},
+    {24,97}, {29,103}, {30,112}, {30,121}, {31,135}, {47,114}, {34,100}, {18,117},
+    {27,103}, {29,118}, {29,123}, {46,126}, {29,126}, {39,126}, {42,123}, {63,107},
+    {44,91}, {51,97}, {31,117}, {45,122}, {45,101}, {69,126}, {37,118}, {92,89},
+    {33,75}, {33,89}, {85,92}, {46,124}, {95,123}, {99,82}, {74,93}, {91,80},
+    {109,42}, {63,103}, {12,108}, {50,81}, {88,116}, {109,76}, {138,82}, {53,37},
 };
 static const Score kPsqtBishop[64] = {
-    {194,194},{223,223},{189,189},{182,182},{174,174},{184,184},{185,185},{193,193},
-    {212,212},{206,206},{212,212},{195,195},{204,204},{188,188},{219,219},{219,219},
-    {220,220},{222,222},{208,208},{226,226},{212,212},{204,204},{212,212},{216,216},
-    {208,208},{201,201},{219,219},{209,209},{209,209},{222,222},{203,203},{221,221},
-    {211,211},{230,230},{219,219},{218,218},{236,236},{220,220},{226,226},{219,219},
-    {197,197},{216,216},{197,197},{219,219},{212,212},{195,195},{232,232},{229,229},
-    {199,199},{211,211},{231,231},{209,209},{199,199},{212,212},{174,174},{209,209},
-    {179,179},{204,204},{196,196},{217,217},{217,217},{183,183},{176,176},{194,194},
+    {16,96}, {59,115}, {-4,98}, {-13,107}, {-17,106}, {-18,109}, {6,92}, {1,103},
+    {41,108}, {21,91}, {41,97}, {5,117}, {25,101}, {3,93}, {37,91}, {44,111},
+    {30,122}, {44,126}, {19,110}, {41,116}, {21,114}, {14,110}, {36,112}, {37,106},
+    {31,104}, {16,108}, {26,121}, {14,116}, {27,113}, {33,130}, {23,107}, {54,107},
+    {35,103}, {40,128}, {32,125}, {23,126}, {48,136}, {41,123}, {37,132}, {46,110},
+    {12,113}, {30,112}, {-14,133}, {15,137}, {14,123}, {-9,150}, {74,118}, {64,101},
+    {6,116}, {15,120}, {61,120}, {27,128}, {2,122}, {46,100}, {-27,114}, {55,96},
+    {28,85}, {23,124}, {-28,124}, {15,129}, {28,124}, {46,108}, {6,87}, {62,91},
 };
 static const Score kPsqtRook[64] = {
-    {314,314},{308,308},{330,330},{337,337},{322,322},{316,316},{297,297},{298,298},
-    {297,297},{308,308},{317,317},{321,321},{308,308},{314,314},{299,299},{296,296},
-    {300,300},{322,322},{331,331},{328,328},{318,318},{323,323},{337,337},{320,320},
-    {329,329},{337,337},{338,338},{338,338},{332,332},{342,342},{324,324},{323,323},
-    {346,346},{347,347},{351,351},{349,349},{351,351},{353,353},{349,349},{343,343},
-    {353,353},{357,357},{366,366},{364,364},{362,362},{370,370},{360,360},{352,352},
-    {360,360},{361,361},{365,365},{377,377},{361,361},{386,386},{365,365},{364,364},
-    {341,341},{345,345},{341,341},{331,331},{342,342},{337,337},{352,352},{349,349},
+    {15,195}, {6,196}, {29,200}, {36,196}, {28,182}, {21,189}, {-14,197}, {8,179},
+    {-8,188}, {-6,196}, {13,198}, {25,188}, {11,181}, {14,189}, {-6,168}, {-34,199},
+    {-11,195}, {14,198}, {15,214}, {24,199}, {15,189}, {26,193}, {58,185}, {22,193},
+    {20,206}, {30,208}, {21,214}, {30,207}, {21,208}, {30,223}, {54,183}, {41,181},
+    {38,216}, {35,213}, {48,212}, {31,214}, {45,215}, {67,205}, {81,194}, {68,190},
+    {34,218}, {54,208}, {40,226}, {55,215}, {59,207}, {87,212}, {99,199}, {73,200},
+    {56,200}, {55,198}, {61,202}, {65,216}, {42,202}, {101,214}, {68,199}, {93,194},
+    {-19,235}, {10,223}, {-55,244}, {-78,241}, {-52,239}, {-4,211}, {75,204}, {75,201},
 };
 static const Score kPsqtQueen[64] = {
-    {553,553},{560,560},{539,539},{568,568},{537,537},{520,520},{553,553},{539,539},
-    {547,547},{557,557},{576,576},{561,561},{567,567},{562,562},{534,534},{553,553},
-    {562,562},{564,564},{576,576},{562,562},{575,575},{571,571},{577,577},{576,576},
-    {563,563},{565,565},{575,575},{575,575},{586,586},{584,584},{585,585},{594,594},
-    {566,566},{576,576},{575,575},{580,580},{603,603},{594,594},{584,584},{588,588},
-    {545,545},{572,572},{587,587},{598,598},{615,615},{610,610},{608,608},{607,607},
-    {563,563},{559,559},{605,605},{591,591},{596,596},{599,599},{594,594},{612,612},
-    {556,556},{569,569},{577,577},{521,521},{586,586},{589,589},{577,577},{587,587},
+    {-66,384}, {-56,414}, {-69,396}, {-59,433}, {-62,370}, {-87,366}, {-48,361}, {-81,371},
+    {-66,394}, {-56,400}, {-44,414}, {-48,398}, {-40,396}, {-41,380}, {-55,332}, {-40,337},
+    {-46,403}, {-56,426}, {-48,458}, {-57,434}, {-48,456}, {-48,433}, {-29,406}, {-18,379},
+    {-48,403}, {-51,434}, {-47,456}, {-68,497}, {-36,474}, {-34,458}, {-18,413}, {-20,435},
+    {-35,410}, {-39,441}, {-46,453}, {-44,474}, {-32,491}, {-16,434}, {-28,430}, {-29,409},
+    {-69,408}, {-63,459}, {-35,449}, {-26,466}, {-34,491}, {-30,457}, {-12,422}, {-28,434},
+    {-45,405}, {-64,428}, {-30,480}, {-87,511}, {-65,490}, {-30,435}, {-48,430}, {5,396},
+    {3,354}, {15,377}, {-30,422}, {-163,502}, {-36,435}, {56,359}, {89,302}, {107,303},
 };
 static const Score kPsqtKing[64] = {
-    {-28,-28},{-1,-1},{-12,-12},{-47,-47},{-30,-30},{-39,-39},{-3,-3},{-24,-24},
-    {-3,-3},{-10,-10},{-18,-18},{-30,-30},{-27,-27},{-23,-23},{-17,-17},{-22,-22},
-    {-16,-16},{-4,-4},{-10,-10},{-4,-4},{-13,-13},{-10,-10},{-19,-19},{-16,-16},
-    {-7,-7},{14,14},{12,12},{26,26},{5,5},{2,2},{11,11},{-11,-11},
-    {5,5},{27,27},{35,35},{44,44},{46,46},{34,34},{21,21},{7,7},
-    {9,9},{27,27},{62,62},{56,56},{64,64},{67,67},{35,35},{33,33},
-    {-9,-9},{19,19},{39,39},{51,51},{59,59},{43,43},{26,26},{6,6},
-    {-2,-2},{-9,-9},{21,21},{21,21},{17,17},{28,28},{5,5},{14,14},
+    {-9,-20}, {39,-29}, {7,-18}, {-88,3}, {-27,-19}, {-67,5}, {19,-16}, {-7,-25},
+    {38,-15}, {29,-12}, {-21,4}, {-58,-2}, {-55,3}, {-31,-5}, {9,-17}, {-8,-21},
+    {17,-24}, {52,-16}, {6,-11}, {-15,5}, {-25,-6}, {-28,-2}, {1,-26}, {-21,-16},
+    {42,-23}, {72,-2}, {30,-1}, {23,17}, {-3,-1}, {-3,-3}, {25,1}, {-19,-18},
+    {54,-10}, {89,5}, {42,24}, {-3,32}, {4,36}, {-6,29}, {43,3}, {-9,1},
+    {87,-5}, {124,6}, {92,34}, {37,38}, {-2,51}, {68,46}, {48,29}, {52,28},
+    {141,-32}, {163,3}, {143,16}, {83,37}, {55,43}, {110,34}, {66,29}, {39,7},
+    {63,-9}, {124,-12}, {126,12}, {92,22}, {48,25}, {69,33}, {53,30}, {-7,24},
 };
 static const Score* const kPsqt[6] = { kPsqtPawn, kPsqtKnight, kPsqtBishop, kPsqtRook, kPsqtQueen, kPsqtKing };
 
@@ -213,20 +213,20 @@ static AttackInfo computeAttackInfo(const Board& board, Color side) {
 // Pesos treináveis via texel_tuner (training/texel_tuner/), valores iniciais = (mg=eg=
 // valor da calibragem anterior sem fase) até ao próximo retreino com tapered eval.
 struct ThreatWeights {
-    Score threatByMinor[6] = {{10,10},{23,23},{26,26},{19,19},{-37,-37},{-141,-141}};
-    Score threatByRook[6]  = {{12,12},{6,6},{22,22},{-4,-4},{41,41},{-175,-175}};
-    Score threatByKing      = {42,42};
-    Score hanging           = {25,25};
-    Score weakQueenProt     = {1,1};
-    Score restrictedPiece   = {2,2};
-    Score threatBySafePawn  = {58,58};
+    Score threatByMinor[6] = {{7,6},{20,35},{43,25},{6,122},{-54,490},{-37,-87}};
+    Score threatByRook[6]  = {{10,20},{-2,32},{13,45},{-3,16},{-93,483},{-63,-119}};
+    Score threatByKing      = {54,50};
+    Score hanging           = {23,43};
+    Score weakQueenProt     = {8,-7};
+    Score restrictedPiece   = {4,-3};
+    Score threatBySafePawn  = {40,137};
     // 🦅 Completam os 11 termos reais do threats() clássico do SF (sf_12..sf_16) -- os 4
     // que faltavam (mais raros/marginais, mas o motor agora vai ao máximo, não fica a
     // meio): ThreatByPawnPush, KnightOnQueen, SliderOnQueen, WeakQueen.
-    Score threatByPawnPush  = {0,0};
-    Score knightOnQueen     = {0,0};
-    Score sliderOnQueen     = {0,0};
-    Score weakQueen         = {0,0};
+    Score threatByPawnPush  = {8,13};
+    Score knightOnQueen     = {5,5};
+    Score sliderOnQueen     = {3,0};
+    Score weakQueen         = {-13,8};
 };
 static const ThreatWeights kThreatW;
 
@@ -238,10 +238,10 @@ static const ThreatWeights kThreatW;
 // clássica). Tamanhos das tabelas = máximo de casas alcançáveis por tipo de peça
 // (Knight≤8, Bishop≤13, Rook≤14, Queen≤27 -- +1 cada p/ incluir o 0).
 struct MobilityWeights {
-    Score knight[9]  = {};
-    Score bishop[14] = {};
-    Score rook[15]   = {};
-    Score queen[28]  = {};
+    Score knight[9]  = {{3,147},{27,198},{25,232},{28,245},{33,259},{40,260},{49,257},{42,253},{39,259}};
+    Score bishop[14] = {{11,221},{33,212},{51,232},{57,244},{58,256},{56,261},{58,271},{62,259},{56,261},{49,259},{59,262},{86,259},{70,260},{104,249}};
+    Score rook[15]   = {{18,381},{35,361},{39,362},{43,373},{38,391},{43,388},{38,403},{37,398},{30,404},{31,406},{36,411},{37,409},{35,409},{46,396},{58,392}};
+    Score queen[28]  = {{-132,926},{-120,839},{-111,760},{-103,755},{-102,788},{-101,768},{-100,782},{-93,795},{-91,791},{-85,784},{-90,799},{-83,806},{-93,799},{-93,810},{-93,815},{-98,799},{-93,804},{-93,795},{-82,788},{-64,773},{-41,756},{-49,751},{-8,687},{93,644},{71,632},{136,604},{320,446},{231,546}};
 };
 static const MobilityWeights kMobilityW;
 
@@ -252,13 +252,13 @@ static const MobilityWeights kMobilityW;
 // Separadamente, penaliza falta de peões-escudo nas 3 casas em frente ao rei (roque
 // destruído/exposto).
 struct KingSafetyWeights {
-    Score attackUnits[50] = {};  // indexado por "unidades de ataque" acumuladas (capadas)
-    Score pawnShieldMissing[4] = {};  // indexado por nº de casas do escudo SEM peão próprio (0..3)
+    Score attackUnits[50] = {{17,-25},{30,18},{14,-7},{19,17},{21,-2},{23,0},{9,7},{13,-2},{12,-9},{17,-25},{26,-5},{10,-9},{24,-41},{-13,-22},{-5,-42},{19,-57},{-3,-41},{-7,-63},{-12,-63},{-20,-85},{-50,-4},{-57,-15},{-53,-41},{-55,-56},{-58,-48},{-21,-54},{-116,15},{-60,-23},{-123,8},{-127,7},{-127,19},{-128,31},{-210,149},{-235,233},{-964,990},{-725,865},{-405,514},{-1125,1328},{-522,758},{-393,501},{-1354,2198},{-293,577},{-158,247},{-150,135},{-46,171},{-74,15},{-47,29},{-42,12},{-27,-7},{-12,26}};
+    Score pawnShieldMissing[4] = {{15,-12},{5,-4},{-7,0},{-14,4}};
     // 🦅 Safe check detection (Ethereal real, src/evaluate.c): distingue "muitos
     // atacantes sem entrada" de "rede de mate disponível" -- conta, por tipo de peça
     // inimiga, quantas casas de onde ela DARIA XEQUE ao nosso rei estão "safe" para ela
     // (atacada pelo inimigo, não suficientemente defendida por nós).
-    Score safeCheck[4] = {};  // queen, rook, bishop, knight (ordem fixa)
+    Score safeCheck[4] = {{-15,-16},{-14,-12},{-5,-17},{-14,-13}};  // queen, rook, bishop, knight
 };
 static const KingSafetyWeights kKingSafetyW;
 
@@ -268,15 +268,15 @@ static const KingSafetyWeights kKingSafetyW;
 // agora (mais complexo de definir corretamente -- precisa de saber se a casa de avanço
 // está controlada pelo inimigo E se nenhum peão adjacente já avançou).
 struct PawnStructureWeights {
-    Score passed[8]   = {};  // indexado pela rank do peão (relativa à perspetiva, 0=própria 1ª fileira)
-    Score isolated    = {};
-    Score doubled     = {};
+    Score passed[8]   = {{0,0},{-93,-20},{-102,0},{-94,35},{-64,47},{-32,90},{53,234},{0,0}};
+    Score isolated    = {-11,-2};
+    Score doubled     = {-17,-15};
     // 🦅 Completam o quadro clássico de pawn structure (inspirados no Ethereal real,
     // src/evaluate.c, reimplementados do zero com pesos próprios):
-    Score backward       = {};  // peão sem vizinhos atrás dele, casa de avanço atacada por peão inimigo
-    Score candidatePasser = {}; // não passado ainda, mas ficaria passado depois duma troca planeada (simplificado)
-    Score passedKingDist[2] = {}; // [0]=distância ao NOSSO rei, [1]=distância ao rei inimigo (por casa de distância, capado)
-    Score passedSafeAdvance = {}; // a casa de avanço do peão passado não está ocupada nem atacada pelo inimigo
+    Score backward       = {-10,-1};  // peão sem vizinhos atrás dele, casa de avanço atacada por peão inimigo
+    Score candidatePasser = {1,2}; // não passado ainda, mas ficaria passado depois duma troca planeada (simplificado)
+    Score passedKingDist[2] = {{12,-17},{3,8}}; // [0]=distância ao NOSSO rei, [1]=distância ao rei inimigo
+    Score passedSafeAdvance = {-7,23}; // a casa de avanço do peão passado não está ocupada nem atacada pelo inimigo
 };
 static const PawnStructureWeights kPawnStructW;
 
@@ -284,30 +284,30 @@ static const PawnStructureWeights kPawnStructW;
 // "rammed" (travados, mesma cor da casa do bispo) -- nenhum destes existia antes,
 // confirmado zero no nosso código contra o Ethereal real.
 struct BishopWeights {
-    Score pair          = {};
-    Score longDiagonal   = {};
-    Score rammedPawn     = {};  // por peão próprio "rammed" (bloqueado por peão inimigo) na cor do bispo
+    Score pair          = {23,50};
+    Score longDiagonal   = {7,0};
+    Score rammedPawn     = {-5,-12};  // por peão próprio "rammed" (bloqueado por peão inimigo) na cor do bispo
 };
 static const BishopWeights kBishopW;
 
 // Outpost: cavalo/bispo numa casa defendida por peão próprio, inalcançável por peões
 // inimigos (nenhum peão inimigo pode chegar a uma casa que o ataque), ranks 4-6.
 struct OutpostWeights {
-    Score knight = {};
-    Score bishop = {};
+    Score knight = {23,0};
+    Score bishop = {36,-6};
 };
 static const OutpostWeights kOutpostW;
 
 // Rook: coluna aberta (sem peões de ninguém) / semi-aberta (sem peão próprio, peão
 // inimigo presente) / 7ª fila (só conta se o rei inimigo ainda está nas 2 últimas filas).
 struct RookWeights {
-    Score openFile     = {};
-    Score semiOpenFile = {};
-    Score seventhRank  = {};
+    Score openFile     = {37,-4};
+    Score semiOpenFile = {25,4};
+    Score seventhRank  = {-20,40};
 };
 static const RookWeights kRookW;
 
-static Score kTempoBonus = {};  // bónus por ser a vez de jogar -- par mg/eg, ver uso em staticEval()
+static Score kTempoBonus = {91,71};  // bónus por ser a vez de jogar -- par mg/eg, ver uso em staticEval()
 static Score computePawnStructureScore(const Board& board, Color side) {
     Bitboard ownPawns = board.pieces(side, PieceType::PAWN);
     Bitboard enemyPawns = board.pieces(~side, PieceType::PAWN);
