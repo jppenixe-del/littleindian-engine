@@ -99,94 +99,98 @@ static int gamePhase(const Board& board) {
     return std::min(phase, MAX_PHASE);
 }
 
-// 🦅 SUBSTITUIÇÃO COMPLETA (2026-06-21): a calibração própria via Texel tuning produziu
-// vários bugs de distorção sistemática mg/eg (dama com -39cp no MG vs +420cp no EG, tempo
-// bonus quase do valor de um peão, etc -- ver histórico git). Decisão explícita do
-// utilizador: ABANDONAR a calibração própria por agora e COPIAR DIRETAMENTE os valores e a
-// lógica REAIS do motor Ethereal (src/evaluate.c, licença GPLv3, código fonte lido e
-// traduzido linha a linha, não reinventado) como ponto de partida CONHECIDO-BOM. Isto serve
-// só de base para gerar o NOSSO PRÓPRIO dataset de treino via self-play contra o Ethereal
-// (passo seguinte, fora desta tarefa) -- não é a calibração final.
-//
-// Convenção de squares: confirmado em board.c do Ethereal real (boardFromFEN começa em
-// sq=56=a8, decrementando) e bitboards.c (square(rank,file)=rank*8+file, fileOf/rankOf
-// triviais) que o Ethereal usa LERF padrão -- a1=0, b1=1, ..., h1=7, a2=8, ..., h8=63.
-// A nossa classe Square (defs.h) usa EXATAMENTE a mesma convenção (comentário "0=A1,
-// 7=H1, 56=A8, 63=H8"). Logo as tabelas abaixo são copiadas DIRETAMENTE do Ethereal, sem
-// nenhum flip — índice i da tabela = mesmo square i no nosso motor. Brancas leem
-// kPsqt[pt][sq] diretamente; pretas leem espelhado verticalmente (sq^56), exatamente como
-// o Ethereal faz em initEval() com relativeSquare(BLACK, sq).
+// PSQTs calibradas via Texel tuning (training/texel_tuner, Rust) a partir de 3.6 BILIÕES
+// de posições reais do binpack test80-2024-06-jun-2tb7p.min-v2.v6 -- ficheiro inteiro, sem
+// filtro de ply (abertura, meio-jogo, finais e posições de mate todos incluídos), com fit
+// de K via line search (coarse-to-fine, mesma ideia do computeOptimalK do Ethereal,
+// src/tuner.c) em vez do K=1/400 hardcoded das versões anteriores. Cada valor já inclui o
+// "valor de material implícito" da peça (a tabela foi treinada do zero, pesos iniciais=0,
+// sem termo de material separado) -- por isso staticEval() NÃO soma um termo de material à
+// parte, só estas tabelas + os termos de threats (também calibrados juntos).
+// Tabelas da perspetiva das BRANCAS (a8=0 .. h1=63); pretas leem espelhado (sq^56).
 static const Score kPsqtPawn[64] = {
     {0,0}, {0,0}, {0,0}, {0,0}, {0,0}, {0,0}, {0,0}, {0,0},
-    {-13,7}, {-4,0}, {1,4}, {6,1}, {3,10}, {-9,4}, {-9,3}, {-16,7},
-    {-21,5}, {-17,6}, {-1,-6}, {12,-14}, {8,-10}, {-4,-5}, {-15,7}, {-24,11},
-    {-14,16}, {-21,17}, {9,-10}, {10,-24}, {4,-22}, {4,-10}, {-20,17}, {-17,18},
-    {-15,18}, {-18,11}, {-16,-8}, {4,-30}, {-2,-24}, {-18,-9}, {-23,13}, {-17,21},
-    {-20,48}, {-9,44}, {1,31}, {17,-9}, {36,-6}, {-9,31}, {-6,45}, {-23,49},
-    {-33,-70}, {-66,-9}, {-16,-22}, {65,-23}, {41,-18}, {39,-14}, {-47,4}, {-62,-51},
+    {-23,16}, {-18,8}, {-36,13}, {-35,27}, {-21,7}, {1,-3}, {9,-15}, {-18,-20},
+    {-7,-9}, {-15,-6}, {-16,-11}, {-26,-28}, {-6,-24}, {6,-14}, {10,-26}, {-9,-38},
+    {-11,1}, {-16,2}, {12,-21}, {9,-40}, {15,-27}, {15,-40}, {7,-13}, {-13,-28},
+    {6,4}, {16,7}, {13,-9}, {19,-28}, {24,-13}, {51,-14}, {14,-9}, {19,-15},
+    {13,35}, {12,48}, {24,20}, {40,-5}, {52,-8}, {62,-6}, {22,9}, {65,3},
+    {15,99}, {-26,114}, {54,82}, {51,60}, {47,70}, {-16,66}, {-25,83}, {16,66},
     {0,0}, {0,0}, {0,0}, {0,0}, {0,0}, {0,0}, {0,0}, {0,0},
 };
 static const Score kPsqtKnight[64] = {
-    {-31,-38}, {-6,-24}, {-20,-22}, {-16,-1}, {-11,-1}, {-22,-19}, {-8,-20}, {-41,-30},
-    {1,-5}, {-11,3}, {-6,-19}, {-1,-2}, {0,0}, {-9,-16}, {-8,-3}, {-6,1},
-    {7,-21}, {8,-5}, {7,2}, {10,19}, {10,19}, {4,2}, {8,-4}, {3,-19},
-    {16,21}, {17,30}, {23,41}, {27,50}, {24,53}, {23,41}, {19,28}, {13,26},
-    {13,30}, {23,30}, {37,51}, {30,70}, {26,67}, {38,50}, {22,33}, {14,28},
-    {-24,25}, {-5,37}, {25,56}, {22,60}, {27,55}, {29,55}, {-1,32}, {-19,25},
-    {13,-2}, {-11,18}, {27,-2}, {37,24}, {41,24}, {40,-7}, {-13,16}, {2,-2},
-    {-167,-5}, {-91,12}, {-117,41}, {-38,17}, {-18,19}, {-105,48}, {-119,24}, {-165,-17},
+    {-145,-63}, {-152,-53}, {-156,-48}, {-140,-32}, {-150,-51}, {-150,-75}, {-167,-33}, {-191,-20},
+    {-169,-38}, {-152,-51}, {-147,-59}, {-120,-60}, {-108,-59}, {-138,-51}, {-154,-46}, {-148,-68},
+    {-154,-47}, {-110,-56}, {-121,-31}, {-110,-29}, {-104,-42}, {-111,-39}, {-98,-57}, {-149,-33},
+    {-105,-39}, {-100,-34}, {-99,-24}, {-99,-16}, {-99,-1}, {-82,-22}, {-95,-36}, {-111,-19},
+    {-102,-34}, {-100,-18}, {-100,-14}, {-83,-11}, {-100,-11}, {-90,-11}, {-87,-13}, {-66,-30},
+    {-85,-46}, {-78,-40}, {-98,-20}, {-84,-15}, {-84,-36}, {-60,-11}, {-92,-19}, {-38,-48},
+    {-96,-62}, {-96,-48}, {-45,-44}, {-84,-13}, {-35,-14}, {-31,-54}, {-56,-44}, {-38,-57},
+    {-21,-94}, {-66,-33}, {-117,-28}, {-80,-56}, {-42,-21}, {-21,-61}, {8,-54}, {-77,-99},
 };
 static const Score kPsqtBishop[64] = {
-    {5,-21}, {1,1}, {-1,5}, {1,5}, {2,8}, {-6,-2}, {0,1}, {4,-25},
-    {26,-17}, {2,-31}, {15,-2}, {8,8}, {8,8}, {13,-3}, {9,-31}, {26,-29},
-    {9,3}, {22,9}, {-5,-3}, {18,19}, {17,20}, {-5,-6}, {20,4}, {15,8},
-    {0,12}, {10,17}, {17,32}, {20,32}, {24,34}, {12,30}, {15,17}, {0,14},
-    {-20,34}, {13,31}, {1,38}, {21,45}, {12,46}, {6,38}, {13,33}, {-14,37},
-    {-13,31}, {-11,45}, {-7,23}, {2,40}, {8,38}, {-21,34}, {-5,46}, {-9,35},
-    {-59,38}, {-49,22}, {-13,30}, {-35,36}, {-33,36}, {-13,33}, {-68,21}, {-55,35},
-    {-66,18}, {-65,36}, {-123,48}, {-107,56}, {-112,53}, {-97,43}, {-33,22}, {-74,15},
+    {-127,-60}, {-84,-42}, {-146,-58}, {-155,-50}, {-159,-51}, {-160,-47}, {-136,-64}, {-141,-54},
+    {-102,-49}, {-121,-66}, {-101,-60}, {-137,-40}, {-117,-56}, {-139,-64}, {-106,-66}, {-98,-46},
+    {-112,-35}, {-98,-31}, {-123,-47}, {-102,-41}, {-121,-43}, {-128,-46}, {-106,-44}, {-105,-51},
+    {-111,-53}, {-127,-49}, {-116,-36}, {-128,-41}, {-115,-44}, {-110,-27}, {-119,-49}, {-89,-50},
+    {-107,-53}, {-103,-28}, {-110,-32}, {-119,-31}, {-94,-21}, {-101,-34}, {-105,-24}, {-96,-47},
+    {-131,-44}, {-112,-45}, {-156,-24}, {-127,-20}, {-128,-34}, {-151,-6}, {-68,-39}, {-79,-55},
+    {-136,-41}, {-127,-37}, {-82,-37}, {-116,-29}, {-140,-35}, {-96,-57}, {-169,-43}, {-87,-61},
+    {-114,-71}, {-119,-33}, {-170,-33}, {-128,-27}, {-115,-33}, {-96,-49}, {-136,-70}, {-81,-66},
 };
 static const Score kPsqtRook[64] = {
-    {-26,-1}, {-21,3}, {-14,4}, {-6,-4}, {-5,-4}, {-10,3}, {-13,-2}, {-22,-14},
-    {-70,5}, {-25,-10}, {-18,-7}, {-11,-11}, {-9,-13}, {-15,-15}, {-15,-17}, {-77,3},
-    {-39,3}, {-16,14}, {-25,9}, {-14,2}, {-12,3}, {-25,8}, {-4,9}, {-39,1},
-    {-32,24}, {-21,36}, {-21,36}, {-5,26}, {-8,27}, {-19,34}, {-13,33}, {-30,24},
-    {-22,46}, {4,38}, {16,38}, {35,30}, {33,32}, {10,36}, {17,31}, {-14,43},
-    {-33,60}, {17,41}, {0,54}, {33,36}, {29,35}, {3,52}, {33,32}, {-26,56},
-    {-18,41}, {-24,47}, {-1,38}, {15,38}, {14,37}, {-2,36}, {-24,49}, {-12,38},
-    {33,55}, {24,63}, {-1,73}, {9,66}, {10,67}, {0,69}, {34,59}, {37,56},
+    {-233,-73}, {-241,-73}, {-218,-69}, {-212,-72}, {-219,-87}, {-226,-80}, {-261,-72}, {-239,-90},
+    {-256,-81}, {-253,-73}, {-234,-71}, {-223,-81}, {-236,-88}, {-234,-80}, {-253,-101}, {-281,-70},
+    {-258,-74}, {-233,-71}, {-232,-55}, {-223,-70}, {-233,-80}, {-221,-75}, {-189,-84}, {-225,-76},
+    {-227,-63}, {-217,-60}, {-226,-54}, {-218,-62}, {-226,-61}, {-218,-46}, {-194,-86}, {-206,-87},
+    {-209,-53}, {-212,-55}, {-200,-57}, {-216,-55}, {-203,-54}, {-181,-64}, {-166,-75}, {-179,-79},
+    {-213,-51}, {-193,-61}, {-208,-43}, {-192,-54}, {-188,-61}, {-161,-57}, {-149,-70}, {-174,-69},
+    {-191,-69}, {-192,-71}, {-186,-67}, {-182,-53}, {-205,-66}, {-146,-55}, {-179,-69}, {-154,-75},
+    {-267,-34}, {-237,-45}, {-302,-24}, {-325,-28}, {-299,-30}, {-251,-57}, {-173,-65}, {-173,-68},
 };
 static const Score kPsqtQueen[64] = {
-    {20,-34}, {4,-26}, {9,-34}, {17,-16}, {18,-18}, {14,-46}, {9,-28}, {22,-44},
-    {6,-15}, {15,-22}, {22,-42}, {13,2}, {17,0}, {22,-49}, {18,-29}, {3,-18},
-    {6,-1}, {21,7}, {5,35}, {0,34}, {2,34}, {5,37}, {24,9}, {13,-15},
-    {9,17}, {12,46}, {-6,59}, {-19,109}, {-17,106}, {-4,57}, {18,48}, {8,33},
-    {-10,42}, {-8,79}, {-19,66}, {-32,121}, {-32,127}, {-23,80}, {-8,95}, {-10,68},
-    {-28,56}, {-23,50}, {-33,66}, {-18,70}, {-17,71}, {-19,63}, {-18,65}, {-28,76},
-    {-16,61}, {-72,108}, {-19,65}, {-52,114}, {-54,120}, {-14,59}, {-69,116}, {-11,73},
-    {8,43}, {19,47}, {0,79}, {3,78}, {-3,89}, {13,65}, {18,79}, {21,56},
+    {-522,-187}, {-512,-157}, {-526,-175}, {-515,-138}, {-518,-200}, {-543,-205}, {-504,-209}, {-537,-200},
+    {-522,-177}, {-512,-171}, {-500,-158}, {-504,-173}, {-496,-175}, {-497,-191}, {-511,-239}, {-496,-233},
+    {-502,-168}, {-512,-145}, {-505,-113}, {-513,-137}, {-504,-115}, {-504,-138}, {-486,-165}, {-474,-192},
+    {-504,-169}, {-507,-137}, {-503,-115}, {-524,-74}, {-493,-97}, {-490,-113}, {-474,-158}, {-476,-136},
+    {-491,-161}, {-496,-130}, {-503,-118}, {-500,-98}, {-488,-80}, {-473,-137}, {-485,-141}, {-486,-162},
+    {-526,-163}, {-519,-112}, {-491,-122}, {-483,-105}, {-490,-80}, {-486,-114}, {-468,-149}, {-485,-137},
+    {-501,-166}, {-520,-144}, {-486,-91}, {-544,-60}, {-522,-81}, {-486,-136}, {-504,-141}, {-451,-175},
+    {-454,-216}, {-442,-194}, {-486,-149}, {-621,-69}, {-493,-136}, {-401,-211}, {-368,-268}, {-350,-267},
 };
 static const Score kPsqtKing[64] = {
-    {87,-77}, {67,-49}, {4,-7}, {-9,-26}, {-10,-27}, {-8,-1}, {57,-50}, {79,-82},
-    {35,3}, {-27,-3}, {-41,16}, {-89,29}, {-64,26}, {-64,28}, {-25,-3}, {30,-4},
-    {-44,-19}, {-16,-19}, {28,7}, {0,35}, {18,32}, {31,9}, {-13,-18}, {-36,-13},
-    {-48,-44}, {98,-39}, {71,12}, {-22,45}, {12,41}, {79,10}, {115,-34}, {-59,-38},
-    {-6,-10}, {95,-39}, {39,14}, {-49,18}, {-27,19}, {35,14}, {81,-34}, {-50,-13},
-    {24,-39}, {123,-22}, {105,-1}, {-22,-21}, {-39,-20}, {74,-15}, {100,-23}, {-17,-49},
-    {0,-98}, {28,-21}, {7,-18}, {-3,-41}, {-57,-39}, {12,-26}, {22,-24}, {-15,-119},
-    {-16,-153}, {49,-94}, {-21,-73}, {-19,-32}, {-51,-55}, {-42,-62}, {53,-93}, {-58,-133},
+    {-8,-15}, {40,-25}, {8,-14}, {-86,7}, {-25,-15}, {-65,9}, {21,-11}, {-5,-21},
+    {39,-11}, {30,-7}, {-19,9}, {-57,2}, {-53,7}, {-29,0}, {10,-13}, {-7,-17},
+    {19,-20}, {53,-12}, {7,-7}, {-14,9}, {-23,-1}, {-26,2}, {3,-21}, {-20,-12},
+    {43,-19}, {73,2}, {31,3}, {25,21}, {-1,3}, {-2,1}, {26,6}, {-18,-14},
+    {55,-6}, {90,9}, {43,28}, {-1,36}, {6,40}, {-5,33}, {44,7}, {-7,6},
+    {88,-1}, {125,10}, {93,38}, {38,42}, {0,55}, {69,50}, {49,33}, {53,32},
+    {142,-27}, {164,8}, {143,21}, {84,41}, {56,47}, {111,38}, {67,33}, {40,11},
+    {64,-5}, {125,-8}, {126,16}, {93,27}, {49,29}, {70,37}, {54,34}, {-6,28},
 };
 static const Score* const kPsqt[6] = { kPsqtPawn, kPsqtKnight, kPsqtBishop, kPsqtRook, kPsqtQueen, kPsqtKing };
 
-// Material: termo SEPARADO do PSQT, valores reais do Ethereal (src/evaluate.c linhas
-// 42-47: PawnValue=S(82,144), KnightValue=S(426,475), BishopValue=S(441,510),
-// RookValue=S(627,803), QueenValue=S(1292,1623), KingValue=S(0,0)).
-static const Score kMaterial[6] = { {82,144}, {426,475}, {441,510}, {627,803}, {1292,1623}, {0,0} };
+// 🦅 Material como termo SEPARADO do PSQT -- causa raiz confirmada via leitura direta do
+// código real do Ethereal (src/evaluate.c: PawnValue=S(82,144) etc, fixo, separado de
+// PawnPSQT[64] pequeno ±10-20cp) e do Sirius (eval_constants.h: MATERIAL[6] + PSQT[6][64]
+// combinados só em compile-time). Sem este termo, o Texel tuner não tem nenhuma restrição
+// que force "o valor de uma peça é parecido no MG e no EG" -- o PSQT (64 graus de
+// liberdade por peça) absorve livremente qualquer correlação espúria entre fase e
+// decisividade nos dados de treino, produzindo o bug encontrado em produção (dama com
+// valor médio -39cp no MG vs +420cp no EG, tempo bonus quase do valor de um peão -- ver
+// commits a5a01b5/d16ba3a/cbb506d, que foram correções ad-hoc pós-hoc, não a fonte
+// estrutural). Placeholder StockFish-like até a calibração v11_material (tuner Rust
+// reestruturado com OFF_MATERIAL) terminar e estes valores serem substituídos pelos
+// REAIS calibrados com esta nova estrutura.
+static const Score kMaterial[6] = { {82,144}, {320,320}, {330,330}, {500,530}, {900,950}, {0,0} };
 
-// AttackInfo: tabelas de ataque por tipo de peça, por lado -- usadas por threats/
-// mobility/king safety abaixo. Estrutura nossa (não existe equivalente 1:1 no Ethereal,
-// que usa EvalInfo com layout diferente), mas computa a mesma informação que o Ethereal
-// guarda em ei->attackedBy[colour][piece] / ei->attacked[colour] / ei->attackedBy2[colour].
+// HCE (sem rede NNUE), fase 2: termos de threats inspirados na estrutura conceptual do
+// threats() do Stockfish (src/evaluate.cpp, era clássica sf_12..sf_16 -- ideias/lista de
+// termos estudados na fonte real, reimplementados aqui do zero, pesos próprios calibrados
+// via Texel tuning, não copiados do SF). Subconjunto dos 11 termos reais: os 7 de maior
+// impacto (ThreatByMinor, ThreatByRook, Hanging, ThreatBySafePawn, RestrictedPiece,
+// WeakQueenProtection, ThreatByKing); ficam de fora por agora KnightOnQueen, SliderOnQueen,
+// ThreatByPawnPush, WeakQueen (mais raros/marginais).
 struct AttackInfo {
     Bitboard byPawn, byKnight, byBishop, byRook, byQueen, byKing, all, all2;
 };
@@ -220,68 +224,63 @@ static AttackInfo computeAttackInfo(const Board& board, Color side) {
             info.all2 |= (cats[i] & cats[j]);
     return info;
 }
-// Threats: substituído pela estrutura REAL do Ethereal (src/evaluate.c, função
-// evaluateThreats() ~linha 1060-1150) -- 10 termos mais simples que o threats() clássico do
-// Stockfish que tínhamos antes (sem split por tipo de peça atacada, sem KnightOnQueen/
-// SliderOnQueen com multiplicador de imbalance). Valores reais, linhas 396-405.
+// Pesos treináveis via texel_tuner (training/texel_tuner/), valores iniciais = (mg=eg=
+// valor da calibragem anterior sem fase) até ao próximo retreino com tapered eval.
 struct ThreatWeights {
-    Score weakPawn             = {-11,-38};
-    Score minorAttackedByPawn  = {-55,-83};
-    Score minorAttackedByMinor = {-25,-45};
-    Score minorAttackedByMajor = {-30,-55};
-    Score rookAttackedByLesser = {-48,-28};
-    Score minorAttackedByKing  = {-43,-21};
-    Score rookAttackedByKing   = {-33,-18};
-    Score queenAttackedByOne   = {-50,-7};
-    Score overloadedPieces     = {-7,-16};
-    Score byPawnPush           = {15,32};
+    Score threatByMinor[6] = {{7,6},{20,35},{43,25},{6,121},{-53,489},{-37,-86}};
+    Score threatByRook[6]  = {{10,20},{-2,32},{12,44},{-3,16},{-92,481},{-63,-118}};
+    Score threatByKing      = {53,50};
+    Score hanging           = {23,43};
+    Score weakQueenProt     = {8,-7};
+    Score restrictedPiece   = {4,-3};
+    Score threatBySafePawn = {40,136};
+    // 🦅 Completam os 11 termos reais do threats() clássico do SF (sf_12..sf_16) -- os 4
+    // que faltavam (mais raros/marginais, mas o motor agora vai ao máximo, não fica a
+    // meio): ThreatByPawnPush, KnightOnQueen, SliderOnQueen, WeakQueen.
+    Score threatByPawnPush  = {8,13};
+    Score knightOnQueen     = {5,5};
+    Score sliderOnQueen     = {3,0};
+    Score weakQueen         = {-13,8};
 };
 static const ThreatWeights kThreatW;
 
-// Mobility: valores reais do Ethereal (src/evaluate.c, KnightMobility[9]/
-// BishopMobility[14]/RookMobility[15]/QueenMobility[28]). Tamanhos das tabelas = máximo de
-// casas alcançáveis por tipo de peça (Knight≤8, Bishop≤13, Rook≤14, Queen≤27 -- +1 cada
-// p/ incluir o 0).
+// HCE fase 3: Mobility geral -- tipicamente o termo de maior ganho único depois de
+// material+PSQT em HCEs maduros (Ethereal, SF clássico). Para cada peça menor/maior
+// (Knight/Bishop/Rook/Queen -- não Pawn/King, que têm dinâmicas próprias), conta quantas
+// casas da "área de mobilidade" ela ataca: exclui casas com peças PRÓPRIAS e casas
+// atacadas por PEÕES INIMIGOS (consideradas perigosas mesmo vazias, convenção SF/Ethereal
+// clássica). Tamanhos das tabelas = máximo de casas alcançáveis por tipo de peça
+// (Knight≤8, Bishop≤13, Rook≤14, Queen≤27 -- +1 cada p/ incluir o 0).
 struct MobilityWeights {
-    Score knight[9]  = {{-104,-139},{-45,-114},{-22,-37},{-8,3},{6,15},{11,34},{19,38},{30,37},{43,17}};
-    Score bishop[14] = {{-99,-186},{-46,-124},{-16,-54},{-4,-14},{6,1},{14,20},{17,35},{19,39},{19,49},{27,48},{26,48},{52,32},{55,47},{83,2}};
-    Score rook[15]   = {{-127,-148},{-56,-127},{-25,-85},{-12,-28},{-10,2},{-12,27},{-11,42},{-4,46},{4,52},{9,55},{11,64},{19,68},{19,73},{37,60},{97,15}};
-    Score queen[28]  = {{-111,-273},{-253,-401},{-127,-228},{-46,-236},{-20,-173},{-9,-86},{-1,-35},{2,-1},{8,8},{10,31},{15,37},{17,55},{20,46},{23,57},{22,58},{21,64},{24,62},{16,65},{13,63},{18,48},{25,30},{38,8},{34,-12},{28,-29},{10,-44},{7,-79},{-42,-30},{-23,-50}};
+    Score knight[9]  = {{-294,-193},{-269,-142},{-271,-108},{-269,-95},{-264,-81},{-257,-80},{-248,-83},{-254,-87},{-258,-81}};
+    Score bishop[14] = {{-287,-134},{-265,-143},{-247,-123},{-242,-111},{-240,-99},{-242,-94},{-240,-84},{-236,-96},{-243,-94},{-249,-96},{-239,-93},{-213,-96},{-228,-96},{-195,-106}};
+    Score rook[15]   = {{-361,-156},{-344,-176},{-340,-175},{-336,-164},{-341,-146},{-336,-150},{-341,-134},{-342,-139},{-349,-133},{-348,-131},{-343,-127},{-342,-128},{-344,-129},{-333,-141},{-320,-146}};
+    Score queen[28]  = {{-963,-133},{-952,-220},{-942,-299},{-934,-304},{-933,-271},{-932,-291},{-932,-277},{-925,-264},{-922,-268},{-916,-275},{-922,-260},{-915,-253},{-924,-260},{-925,-249},{-925,-244},{-930,-260},{-925,-254},{-924,-264},{-914,-271},{-895,-285},{-873,-302},{-881,-308},{-840,-371},{-740,-414},{-762,-426},{-697,-454},{-514,-610},{-601,-511}};
 };
 static const MobilityWeights kMobilityW;
 
-// King Safety: mapeado para os termos REAIS do Ethereal (src/evaluate.c, função
-// evaluateKings() ~914-1010) que têm equivalente direto na nossa estrutura existente
-// (attacker weight por tipo de peça, safe-check por tipo de peça). NÃO replicado 100%
-// (decisão explícita, ver instruções da tarefa): o Ethereal real também tem
-// SafetyShelter[2][8]/SafetyStorm[2][8] (tabelas de shelter/storm por distância de peão,
-// indexadas pela estrutura de peões à frente do rei) que dependem da infraestrutura de
-// pawn-king cache do Ethereal (ei->pksafety, calculado em evaluateKingsPawns) -- não temos
-// esse cache nem essa decomposição por ficheiro/distância; o nosso pawnShieldMissing[4]
-// (contagem simples de casas-escudo vazias) é a aproximação mais próxima sem reescrever a
-// arquitetura. Os valores de pawnShieldMissing ficam como estavam (não têm equivalente
-// 1:1 no Ethereal para copiar).
+// HCE fase 5: King Safety -- zona de perigo à volta do rei (king ring: a própria casa +
+// as 8 adjacentes), conta ataques inimigos por tipo de peça nessa zona, pesados e
+// indexados numa tabela não-linear (mesma ideia clássica SF/Ethereal: o perigo cresce
+// mais que linearmente com o número de atacantes -- 1 atacante é normal, 4+ é critico).
+// Separadamente, penaliza falta de peões-escudo nas 3 casas em frente ao rei (roque
+// destruído/exposto).
 struct KingSafetyWeights {
-    // SafetyKnightWeight/Bishop/Rook/Queen (linhas 341-344): bónus fixo por peça atacante
-    // (não por casa), somado uma vez por peça cujos ataques intersectam a área do rei.
-    Score attackerWeight[4] = {{48,41},{24,35},{36,8},{30,6}};  // knight, bishop, rook, queen
-    // SafetyAttackValue (linha 346): multiplicado pela contagem de ataques escalada
-    // (scaledAttackCounts no Ethereal real -- 9 * kingAttacksCount / popcount(kingArea)).
-    Score attackValue       = {45,34};
-    // SafetyWeakSquares (347): por casa fraca (atacada pelo inimigo, não 2x defendida por
-    // nós, só defendida por dama/rei próprios) dentro da área do rei.
-    Score weakSquares       = {42,41};
-    // SafetyNoEnemyQueens (348): bónus de segurança GRANDE quando o inimigo não tem dama
-    // (perigo de mate cai drasticamente sem ela).
-    Score noEnemyQueens     = {-237,-259};
-    // SafetyAdjustment (353): offset fixo aplicado sempre que o ramo de king safety corre.
-    Score adjustment        = {-74,-26};
-    Score pawnShieldMissing[4] = {{13,-28},{10,-7},{-2,4},{-24,12}};
-    // SafetySafeQueenCheck/RookCheck/BishopCheck/KnightCheck (349-352): valores reais do
-    // Ethereal -- conta, por tipo de peça inimiga, quantas casas de onde ela DARIA XEQUE ao
-    // nosso rei estão "safe" para ela (atacada pelo inimigo, não suficientemente defendida
-    // por nós).
-    Score safeCheck[4] = {{93,83},{90,98},{59,59},{112,117}};  // queen, rook, bishop, knight
+    // 🦅 FIX: índices 33-40 (muitas "unidades de ataque" simultâneas, RARO no dataset --
+    // posições com 6+ peças a atacar a king ring ao mesmo tempo) saíam do treino com
+    // valores absurdos ({-1354,2198} no índice 40!), comparados com vizinhos estáveis
+    // ({-210,149} no 32, {-293,577} no 41) -- ruído de poucos dados nesses buckets, não
+    // sinal real. Esses saltos bruscos entre índices ADJACENTES quebram a suavidade que
+    // RFP/NMP/etc precisam para podar bem, causando uma explosão real de nós (depth12
+    // >15x depth11 numa posição encontrada na validação). Suavizado por interpolação
+    // linear entre os pontos estáveis vizinhos (32 e 41) + cap em ±300mg/±400eg.
+    Score attackUnits[50] = {{17,-23},{30,20},{14,-4},{19,20},{21,0},{23,2},{9,9},{13,0},{13,-6},{17,-23},{26,-3},{10,-7},{24,-38},{-13,-19},{-5,-40},{19,-55},{-3,-39},{-7,-60},{-11,-61},{-20,-82},{-49,-2},{-57,-13},{-52,-38},{-55,-54},{-58,-46},{-20,-52},{-115,18},{-59,-20},{-123,10},{-126,9},{-126,21},{-127,33},{-209,150},{-218,197},{-227,244},{-236,291},{-245,338},{-254,386},{-263,400},{-272,400},{-281,400},{-290,400},{-156,248},{-146,130},{-41,166},{-71,14},{-40,29},{-36,13},{-22,-6},{-7,25}};
+    Score pawnShieldMissing[4] = {{14,-11},{5,-3},{-7,1},{-14,5}};
+    // 🦅 Safe check detection (Ethereal real, src/evaluate.c): distingue "muitos
+    // atacantes sem entrada" de "rede de mate disponível" -- conta, por tipo de peça
+    // inimiga, quantas casas de onde ela DARIA XEQUE ao nosso rei estão "safe" para ela
+    // (atacada pelo inimigo, não suficientemente defendida por nós).
+    Score safeCheck[4] = {{-15,-16},{-14,-12},{-5,-16},{-14,-13}};  // queen, rook, bishop, knight
 };
 static const KingSafetyWeights kKingSafetyW;
 
@@ -290,66 +289,54 @@ static const KingSafetyWeights kKingSafetyW;
 // rank) e dobrados (2+ peões próprios na mesma coluna). Backward pawn fica de fora por
 // agora (mais complexo de definir corretamente -- precisa de saber se a casa de avanço
 // está controlada pelo inimigo E se nenhum peão adjacente já avançou).
-// Pawn Structure: valores reais do Ethereal (src/evaluate.c, função evaluatePawns()).
-// Dimensões mantidas o mais fiel possível ao Ethereal real: PawnIsolated é por FICHEIRO,
-// PawnStacked é por [flag de "candidato a desempatar"][ficheiro], PawnBackwards é por
-// [flag de "ficheiro aberto"][rank relativo]. Usamos PassedPawn[canAdvance=1][safeAdvance]
-// (a linha "pode avançar" do Ethereal, já que a nossa deteção de "passed" não distingue
-// bloqueado-por-peça-própria como o Ethereal faz) como base de kPawnStructW.passed[rank];
-// o nosso passedSafeAdvance soma a diferença extra quando a casa de avanço também está
-// livre de ataques (aproximação da 2ª dimensão real do Ethereal).
 struct PawnStructureWeights {
-    Score passed[8]   = {{0,0},{-28,13},{-40,42},{-56,44},{-2,56},{114,54},{193,94},{0,0}}; // PassedPawn[1][1][rank]
-    Score isolated[8] = {{-13,-12},{-1,-16},{1,-16},{3,-18},{7,-19},{3,-15},{-4,-14},{-4,-17}}; // PawnIsolated[file]
-    Score doubled[8]  = {{10,-29},{-2,-26},{0,-23},{0,-20},{3,-20},{5,-26},{4,-30},{8,-31}}; // PawnStacked[0][file]
-    // PawnBackwards[1][rank] (flag=1: coluna sem peão inimigo -- mais próximo do nosso
-    // teste "mostBackward" que não verifica controlo de casa por peça própria).
-    Score backward[8] = {{0,0},{-9,-32},{-5,-30},{3,-31},{29,-41},{0,0},{0,0},{0,0}};
-    Score candidatePasser = {21,59}; // PawnCandidatePasser[1][rank=5] (representativo, sem dimensão de rank na nossa deteção)
-    // PassedFriendlyDistance/PassedEnemyDistance reais são por RANK (8 entradas cada); a
-    // nossa estrutura só soma uma constante * distância (sem dimensão de rank) -- usamos
-    // os valores do rank intermédio (rank=4, mais frequente em peões passados ativos)
-    // como representativos.
-    Score passedKingDist[2] = {{6,-19},{0,25}}; // [0]=PassedFriendlyDistance[4], [1]=PassedEnemyDistance[4]
-    Score passedSafeAdvance = {-49,57}; // PassedSafePromotionPath
+    Score passed[8]   = {{0,0},{-93,-19},{-102,0},{-94,35},{-64,47},{-31,90},{-14,118},{0,0}};
+    Score isolated    = {-11,-2};
+    Score doubled     = {-17,-15};
+    // 🦅 Completam o quadro clássico de pawn structure (inspirados no Ethereal real,
+    // src/evaluate.c, reimplementados do zero com pesos próprios):
+    Score backward       = {-10,-1};  // peão sem vizinhos atrás dele, casa de avanço atacada por peão inimigo
+    Score candidatePasser = {1,2}; // não passado ainda, mas ficaria passado depois duma troca planeada (simplificado)
+    Score passedKingDist[2] = {{12,-17},{3,8}}; // [0]=distância ao NOSSO rei, [1]=distância ao rei inimigo
+    Score passedSafeAdvance = {-7,23}; // a casa de avanço do peão passado não está ocupada nem atacada pelo inimigo
 };
 static const PawnStructureWeights kPawnStructW;
 
-// Bishop: valores reais do Ethereal (BishopPair/BishopRammedPawns, src/evaluate.c linhas
-// 225-227; BishopLongDiagonal linha 236).
+// Bispo/cavalo: par de bispos, bispo na diagonal longa central (sem bloqueio), peões
+// "rammed" (travados, mesma cor da casa do bispo) -- nenhum destes existia antes,
+// confirmado zero no nosso código contra o Ethereal real.
 struct BishopWeights {
-    Score pair          = {22,88};
-    Score longDiagonal   = {26,20};
-    Score rammedPawn     = {-8,-17};  // por peão próprio "rammed" (bloqueado por peão inimigo) na cor do bispo
+    Score pair          = {22,50};
+    Score longDiagonal   = {7,0};
+    Score rammedPawn     = {-5,-12};  // por peão próprio "rammed" (bloqueado por peão inimigo) na cor do bispo
 };
 static const BishopWeights kBishopW;
 
-// Outpost: valores reais do Ethereal (KnightOutpost[2][2]/BishopOutpost[2][2], src/
-// evaluate.c linhas 206-209/229-232) -- indexados por [outside=ficheiro A/H][defended=
-// apoiado por peão próprio]. Casa de outpost = rank relativo 4-6, inalcançável por peão
-// inimigo (outpostSquareMasks real); ao contrário da nossa versão anterior, "defended"
-// aqui NÃO é condição obrigatória, só escolhe qual das 4 entradas usar.
+// Outpost: cavalo/bispo numa casa defendida por peão próprio, inalcançável por peões
+// inimigos (nenhum peão inimigo pode chegar a uma casa que o ataque), ranks 4-6.
 struct OutpostWeights {
-    Score knight[2][2] = {{{12,-32},{40,0}},{{7,-24},{21,-3}}};
-    Score bishop[2][2] = {{{16,-16},{50,-3}},{{9,-9},{-4,-4}}};
+    Score knight = {23,0};
+    Score bishop = {36,-6};
 };
 static const OutpostWeights kOutpostW;
 
-// Rook: valores reais do Ethereal (RookFile[2]/RookOnSeventh, src/evaluate.c linhas
-// 247-249). RookFile[0]=semi-open (peão inimigo presente), RookFile[1]=open (nenhum peão).
+// Rook: coluna aberta (sem peões de ninguém) / semi-aberta (sem peão próprio, peão
+// inimigo presente) / 7ª fila (só conta se o rei inimigo ainda está nas 2 últimas filas).
 struct RookWeights {
-    Score openFile     = {34,8};
-    Score semiOpenFile = {10,9};
-    Score seventhRank = {-1,42};
+    Score openFile     = {37,-4};
+    Score semiOpenFile = {25,4};
+    Score seventhRank = {-20,40};
 };
 static const RookWeights kRookW;
 
-// Tempo: o Ethereal real usa um valor FIXO (não Score{mg,eg}) -- const int Tempo = 20,
-// somado uma vez (não tapered) depois da conversão de perspetiva em evaluateBoard(). Como
-// o resto do nosso staticEval() interpola kTempoBonus pela fase por consistência de tipo
-// com as outras tabelas, usamos mg=eg=20 (interpola sempre para 20, qualquer que seja a
-// fase -- comportamento idêntico ao valor fixo do Ethereal).
-static Score kTempoBonus = {20,20};
+// 🦅 FIX: o valor calibrado (91,71) saía da MESMA anomalia de correlação espúria
+// fase/decisividade encontrada nos outros termos (commits a5a01b5/d16ba3a) -- "ter a vez
+// de jogar" tende a correlacionar com posições de abertura nos dados de treino, inflando
+// o tempo bonus para uma escala que rivaliza com o valor de UM PEÃO (confirmado: numa
+// posição com 1 peão de diferença, o lado que tinha a vez SUPERAVA largamente o lado com
+// mais material, só pelo tempo). Motores reais usam tipicamente 10-20cp. Reduzido para um
+// valor seguro em vez de tentar recalibrar isto isoladamente.
+static Score kTempoBonus = {15,10};
 
 // 🦅 Máscaras de bitboard O(1) para substituir os loops O(8)/O(64) explícitos das funções
 // de pawn structure/outpost/rook abaixo -- encontrado em produção que o HCE tinha caído
@@ -398,11 +385,11 @@ static Score computePawnStructureScore(const Board& board, Color side) {
 
         // Doubled: outro peão próprio na MESMA coluna.
         bool doubledHere = (ownPawnsHere & fileMaskBB(file)).any();
-        if (doubledHere) score += kPawnStructW.doubled[file];
+        if (doubledHere) score += kPawnStructW.doubled;
 
         // Isolated: nenhum peão próprio nas colunas adjacentes (qualquer rank).
         bool hasNeighbor = (ownPawns & adjacentFilesMaskBB(file)).any();
-        if (!hasNeighbor) score += kPawnStructW.isolated[file];
+        if (!hasNeighbor) score += kPawnStructW.isolated;
 
         // Backward: tem vizinhos (não isolado), mas nenhum peão próprio nas colunas
         // [file-1,file,file+1] está "atrás" dele (mesma rank ou mais atrás) -- é o mais
@@ -420,8 +407,7 @@ static Score computePawnStructureScore(const Board& board, Color side) {
                         if (ef2 <= 7 && enemyPawns.test(Square((enemyRank << 3) | ef2).value())) advanceAttacked = true;
                     }
                 }
-                int relRankBack = (side == Color::WHITE) ? rank : 7 - rank;
-                if (advanceAttacked) score += kPawnStructW.backward[relRankBack];
+                if (advanceAttacked) score += kPawnStructW.backward;
             }
         }
 
@@ -488,33 +474,22 @@ static Score computeBishopScore(const Board& board, Color side) {
     return score;
 }
 
-// Outpost: cavalo/bispo em rank 4-6 (relativa) que NENHUM peão inimigo pode atacar
-// (colunas adjacentes, à frente, em nenhuma rank -- outpostSquareMasks real do Ethereal).
-// "defended" (apoiado por peão próprio) escolhe a entrada da tabela, não é obrigatório.
+// Outpost: cavalo/bispo numa casa defendida por peão próprio, em rank 4-6 (relativa),
+// que NENHUM peão inimigo pode atacar (nas colunas adjacentes, à frente, em nenhuma rank).
 static Score computeOutpostScore(const Board& board, Color side, const AttackInfo& us) {
     Bitboard enemyPawns = board.pieces(~side, PieceType::PAWN);
     Score score;
-    auto outpostInfo = [&](Square sq, bool& outside, bool& defended) -> bool {
+    auto isOutpost = [&](Square sq) -> bool {
         int relRank = (side == Color::WHITE) ? sq.rank() : 7 - sq.rank();
         if (relRank < 3 || relRank > 5) return false;
+        if (!us.byPawn.test(sq.value())) return false;  // defendido por peão próprio
         Bitboard front = frontSpanBB(side, sq.file(), sq.rank()) & adjacentFilesMaskBB(sq.file());
-        if ((enemyPawns & front).any()) return false;
-        outside = (sq.file() == 0 || sq.file() == 7);
-        defended = us.byPawn.test(sq.value());
-        return true;
+        return (enemyPawns & front).empty();
     };
     Bitboard bb = board.pieces(side, PieceType::KNIGHT);
-    while (bb.any()) {
-        Square sq = bb.poplsb();
-        bool outside, defended;
-        if (outpostInfo(sq, outside, defended)) score += kOutpostW.knight[outside][defended];
-    }
+    while (bb.any()) { Square sq = bb.poplsb(); if (isOutpost(sq)) score += kOutpostW.knight; }
     bb = board.pieces(side, PieceType::BISHOP);
-    while (bb.any()) {
-        Square sq = bb.poplsb();
-        bool outside, defended;
-        if (outpostInfo(sq, outside, defended)) score += kOutpostW.bishop[outside][defended];
-    }
+    while (bb.any()) { Square sq = bb.poplsb(); if (isOutpost(sq)) score += kOutpostW.bishop; }
     return score;
 }
 
@@ -540,23 +515,27 @@ static Score computeRookScore(const Board& board, Color side) {
     }
     return score;
 }
-// computeKingSafetyScore: tradução do essencial de evaluateKings() do Ethereal real
-// (src/evaluate.c ~914-1010) -- attacker weight por peça, weak squares, safe checks,
-// ausência de damas inimigas, e a conversão não-linear final
-// eval += MakeScore(-mg*max(0,mg)/720, -max(0,eg)/20). Gate: só entra no ramo "perigoso"
-// quando kingAttackersCount > 1 - popcount(enemyQueens) (mesma condição real do Ethereal),
-// senão devolve só o termo de pawn shield (aproximação nossa sem equivalente direto, ver
-// comentário em KingSafetyWeights).
+// Pesos por tipo de peça atacante (não treináveis -- são só a PONDERAÇÃO usada para somar
+// "unidades de ataque" antes de indexar a tabela; o ganho/perigo REAL fica todo nos pesos
+// treináveis kKingSafetyW.attackUnits[]). Convenção clássica SF: dama pesa mais que torre,
+// que pesa mais que menor.
+// 🦅 FIX: pawn era 0 aqui mas 1 no Rust tuner (texel_tuner_main.rs KING_ATTACK_WEIGHT) --
+// divergência silenciosa confirmada via revisão estrutural do Opus: o tuner indexava
+// attackUnits[] num índice diferente do que o motor usa de facto. Alinhado a 1 em ambos.
+static constexpr int kKingAttackWeight[6] = { 1, 2, 2, 3, 5, 0 };  // pawn,knight,bishop,rook,queen,king
 static Score computeKingSafetyScore(const Board& board, Color side, const AttackInfo& us, const AttackInfo& them) {
     Square ksq = board.kingSq(side);
     Bitboard ring = attacks::kingAttacks(ksq) | Bitboard::fromSquare(ksq);
-    Bitboard occ = board.allOcc;
-
-    Score score;
+    int units = 0;
+    units += kKingAttackWeight[int(PieceType::KNIGHT)] * (them.byKnight & ring).popcount();
+    units += kKingAttackWeight[int(PieceType::BISHOP)] * (them.byBishop & ring).popcount();
+    units += kKingAttackWeight[int(PieceType::ROOK)]   * (them.byRook & ring).popcount();
+    units += kKingAttackWeight[int(PieceType::QUEEN)]  * (them.byQueen & ring).popcount();
+    units += kKingAttackWeight[int(PieceType::PAWN)]   * (them.byPawn & ring).popcount();
+    Score score = kKingSafetyW.attackUnits[std::min(units, 49)];
 
     // Pawn shield: as 3 casas imediatamente em frente ao rei (rank+1 para brancas,
-    // rank-1 para pretas), nos ficheiros [file-1, file, file+1]. Aproximação nossa do
-    // shelter (sem equivalente direto SafetyShelter/Storm do Ethereal -- ver comentário).
+    // rank-1 para pretas), nos ficheiros [file-1, file, file+1].
     int kf = ksq.file(), kr = ksq.rank();
     int shieldRank = (side == Color::WHITE) ? kr + 1 : kr - 1;
     int missing = 0;
@@ -571,70 +550,27 @@ static Score computeKingSafetyScore(const Board& board, Color side, const Attack
     }
     score += kKingSafetyW.pawnShieldMissing[std::min(missing, 3)];
 
-    // kingAttackersCount/Weight: nº de peças inimigas (não-peão) cujos ataques tocam a
-    // área do rei, e o bónus fixo acumulado por tipo de peça (SafetyKnightWeight etc).
-    int attackersCount = 0;
-    Score attackersWeight;
-    int attacksCount = 0; // soma de casas atacadas na área do rei (kingAttacksCount real)
-    auto countAttacker = [&](Bitboard atk, int weightIdx) {
-        Bitboard hit = atk & ring;
-        if (hit.any()) {
-            attackersCount += 1;
-            attackersWeight += kKingSafetyW.attackerWeight[weightIdx];
-            attacksCount += hit.popcount();
-        }
-    };
-    countAttacker(them.byKnight, 0);
-    countAttacker(them.byBishop, 1);
-    countAttacker(them.byRook,   2);
-    countAttacker(them.byQueen,  3);
-    attacksCount += (them.byPawn & ring).popcount();
-
-    Bitboard enemyQueens = board.pieces(~side, PieceType::QUEEN);
-    if (attackersCount <= 1 - (int)enemyQueens.popcount()) return score;
-
-    // Weak squares: atacadas pelo inimigo, defendidas no máximo 1x por nós, e essa
-    // defesa (se existir) é só dama ou rei próprios.
-    Bitboard weak = them.all & ~us.all2 & (~us.all | us.byQueen | us.byKing);
-
-    int kingAreaSquares = ring.popcount();
-    int scaledAttackCounts = kingAreaSquares > 0 ? (9 * attacksCount) / kingAreaSquares : 0;
-
-    Bitboard safeForThem = ~us.all | (weak & them.all2);
+    // Safe check: casas de onde uma peça inimiga do tipo X DARIA XEQUE ao nosso rei
+    // (ataque simétrico a partir da posição do rei), que essa peça realmente alcança, E
+    // que são "safe" para o inimigo (não defendidas por nós, ou defendidas só por uma
+    // peça mas atacadas 2x pelo inimigo -- mesma ideia do "weak" em computeThreatScore).
+    Bitboard occ = board.allOcc;
+    Bitboard safeForThem = ~us.all | them.all2;
     Bitboard queenChecks  = (attacks::bishopAttacks(ksq, occ) | attacks::rookAttacks(ksq, occ)) & them.byQueen & safeForThem;
     Bitboard rookChecks   = attacks::rookAttacks(ksq, occ) & them.byRook & safeForThem;
     Bitboard bishopChecks = attacks::bishopAttacks(ksq, occ) & them.byBishop & safeForThem;
     Bitboard knightChecks = attacks::knightAttacks(ksq) & them.byKnight & safeForThem;
-
-    Score safety = attackersWeight;
-    safety += kKingSafetyW.attackValue * scaledAttackCounts;
-    safety += kKingSafetyW.weakSquares * (weak & ring).popcount();
-    if (!enemyQueens.any()) safety += kKingSafetyW.noEnemyQueens;
-    safety += kKingSafetyW.safeCheck[0] * queenChecks.popcount();
-    safety += kKingSafetyW.safeCheck[1] * rookChecks.popcount();
-    safety += kKingSafetyW.safeCheck[2] * bishopChecks.popcount();
-    safety += kKingSafetyW.safeCheck[3] * knightChecks.popcount();
-    safety += kKingSafetyW.adjustment;
-
-    // Conversão não-linear real do Ethereal: o perigo cresce mais que linearmente no MG
-    // (quadrático em mg), linear no EG.
-    int mg = safety.mg, eg = safety.eg;
-    score += Score{ -mg * std::max(0, mg) / 720, -std::max(0, eg) / 20 };
+    score += kKingSafetyW.safeCheck[0] * queenChecks.popcount();
+    score += kKingSafetyW.safeCheck[1] * rookChecks.popcount();
+    score += kKingSafetyW.safeCheck[2] * bishopChecks.popcount();
+    score += kKingSafetyW.safeCheck[3] * knightChecks.popcount();
     return score;
 }
-// Mobility area: tradução fiel da definição real do Ethereal (initEvalInfo(), src/
-// evaluate.c linhas 1349-1350): ~(pawnAttacks[enemy] | ownKing | ownBlockedPawns) --
-// NOTA: ao contrário da nossa versão anterior, isto NÃO exclui casas ocupadas por outras
-// peças próprias (cavalo/bispo/torre/dama) -- só o próprio rei e peões bloqueados. Squares
-// com peças próprias não-rei/não-peão-bloqueado contam normalmente para mobilidade.
 static Score computeMobilityScore(const Board& board, Color side, const AttackInfo& them) {
+    Bitboard ownPieces = Bitboard(0ULL);
+    for (int pt = 0; pt < 6; ++pt) ownPieces |= board.pieceBB[int(side)][pt];
+    Bitboard mobilityArea = ~ownPieces & ~them.byPawn;
     Bitboard occ = board.allOcc;
-    Bitboard ownPawns = board.pieces(side, PieceType::PAWN);
-    Bitboard ownKingBB = Bitboard::fromSquare(board.kingSq(side));
-    Bitboard blockedPawns = (side == Color::WHITE)
-        ? Bitboard((occ.value() >> 8) & ownPawns.value())   // own pawn with a piece directly ahead (white)
-        : Bitboard((occ.value() << 8) & ownPawns.value());  // own pawn with a piece directly ahead (black)
-    Bitboard mobilityArea = ~(them.byPawn | ownKingBB | blockedPawns);
     Score score;
     Bitboard bb = board.pieces(side, PieceType::KNIGHT);
     while (bb.any()) {
@@ -664,90 +600,141 @@ static Score computeMobilityScore(const Board& board, Color side, const AttackIn
 // removendo a peça interposta mais próxima, um slider inimigo do tipo compatível
 // (bispo/dama numa diagonal, torre/dama numa reta) a atacaria -- vulnerabilidade a um
 // pin/ataque descoberto potencial, não um ataque já realizado.
-// computeWeakQueenScore removida -- WeakQueen (pin/ataque descoberto potencial à nossa
-// dama) não existe no modelo de threats real do Ethereal (evaluateThreats(), src/
-// evaluate.c ~1060-1150); substituído integralmente pelos 10 termos reais abaixo.
+static Score computeWeakQueenScore(const Board& board, Color side) {
+    Bitboard ownQueens = board.pieces(side, PieceType::QUEEN);
+    if (!ownQueens.any()) return Score{};
+    Color enemy = ~side;
+    Bitboard enemyDiagSliders = board.pieces(enemy, PieceType::BISHOP) | board.pieces(enemy, PieceType::QUEEN);
+    Bitboard enemyOrthoSliders = board.pieces(enemy, PieceType::ROOK) | board.pieces(enemy, PieceType::QUEEN);
+    static constexpr int kDirs[8][2] = { {1,0},{-1,0},{0,1},{0,-1},{1,1},{1,-1},{-1,1},{-1,-1} };
+    Score score;
+    Bitboard qbb = ownQueens;
+    while (qbb.any()) {
+        Square qsq = qbb.poplsb();
+        int qf = qsq.file(), qr = qsq.rank();
+        for (int d = 0; d < 8; ++d) {
+            bool diagonal = kDirs[d][0] != 0 && kDirs[d][1] != 0;
+            Bitboard relevantSliders = diagonal ? enemyDiagSliders : enemyOrthoSliders;
+            if (!relevantSliders.any()) continue;
+            int f = qf, r = qr;
+            Square blocker = SQ_NONE;
+            for (int step = 0; step < 7; ++step) {
+                f += kDirs[d][0]; r += kDirs[d][1];
+                if (f < 0 || f > 7 || r < 0 || r > 7) break;
+                Square sq((r << 3) | f);
+                if (!board.allOcc.test(sq.value())) continue;
+                if (!blocker.isValid()) {
+                    blocker = sq;
+                    continue;
+                }
+                if (relevantSliders.test(sq.value())) score += kThreatW.weakQueen;
+                break;
+            }
+        }
+    }
+    return score;
+}
 
-// Threats: tradução fiel de evaluateThreats() do Ethereal real (src/evaluate.c
-// ~linha 1060-1150). `us`/`them` = AttackInfo de side/enemy (equivalente ao
-// ei->attackedBy[colour][piece] do Ethereal). Avalia ameaças de `side` contra `enemy`.
+// Conta os 7 termos para `side` atacando o adversário; devolve a soma já pesada (mg,eg).
 static Score computeThreatScore(const Board& board, Color side, const AttackInfo& us, const AttackInfo& them) {
     Color enemy = ~side;
-
-    Bitboard pawns   = board.pieces(side, PieceType::PAWN);
-    Bitboard knights = board.pieces(side, PieceType::KNIGHT);
-    Bitboard bishops = board.pieces(side, PieceType::BISHOP);
-    Bitboard rooks   = board.pieces(side, PieceType::ROOK);
-    Bitboard queens  = board.pieces(side, PieceType::QUEEN);
-    Bitboard occupied = board.allOcc;
-
-    Bitboard attacksByPawns  = them.byPawn;
-    Bitboard attacksByMinors = them.byKnight | them.byBishop;
-    Bitboard attacksByMajors = them.byRook | them.byQueen;
-
-    // Squares with more attackers, few defenders, and no pawn support
-    Bitboard poorlyDefended = (them.all & ~us.all)
-                            | (them.all2 & ~us.all2 & ~us.byPawn);
-
-    Bitboard weakMinors = (knights | bishops) & poorlyDefended;
-
-    // A friendly minor or major is overloaded if attacked and defended by exactly one
-    Bitboard overloaded = (knights | bishops | rooks | queens)
-                         & us.all & ~us.all2
-                         & them.all & ~them.all2;
-
-    // Look for enemy non-pawn pieces which we may threaten with a pawn advance.
-    Bitboard Rank3Rel = (side == Color::WHITE) ? Bitboard(0x0000000000FF0000ULL)
-                                                : Bitboard(0x0000FF0000000000ULL);
-    auto pawnAdvanceBB = [&](Bitboard p, Bitboard occ) -> Bitboard {
-        return (side == Color::WHITE) ? Bitboard((p.value() << 8) & ~occ.value())
-                                       : Bitboard((p.value() >> 8) & ~occ.value());
-    };
-    auto pawnAttacksOf = [&](Bitboard p) -> Bitboard {
-        return (side == Color::WHITE) ? attacks::pawnAttacks<Color::WHITE>(p)
-                                       : attacks::pawnAttacks<Color::BLACK>(p);
-    };
-
-    Bitboard pushThreat = pawnAdvanceBB(pawns, occupied);
-    pushThreat |= pawnAdvanceBB(pushThreat & ~attacksByPawns & Rank3Rel, occupied);
-    pushThreat = pushThreat & ~attacksByPawns & (us.all | ~them.all);
     Bitboard enemyAll = Bitboard(0ULL);
     for (int pt = 0; pt < 6; ++pt) enemyAll |= board.pieceBB[int(enemy)][pt];
-    Bitboard enemyNonPawnTargets = enemyAll & ~board.pieces(enemy, PieceType::PAWN) & ~us.byPawn;
-    pushThreat = pawnAttacksOf(pushThreat) & enemyNonPawnTargets;
+    Bitboard enemyPawns = board.pieceBB[int(enemy)][int(PieceType::PAWN)];
+    Bitboard nonPawnEnemiesReal = enemyAll & ~enemyPawns;
+
+    Bitboard stronglyProtected = them.byPawn | (them.all2 & ~us.all2);
+    Bitboard defended = nonPawnEnemiesReal & stronglyProtected;
+    Bitboard weak = enemyAll & ~stronglyProtected & us.all;
 
     Score score;
-
-    // Penalty for each of our poorly supported pawns
-    score += kThreatW.weakPawn * (pawns & ~attacksByPawns & poorlyDefended).popcount();
-
-    // Penalty for pawn threats against our minors
-    score += kThreatW.minorAttackedByPawn * ((knights | bishops) & attacksByPawns).popcount();
-
-    // Penalty for any minor threat against minor pieces
-    score += kThreatW.minorAttackedByMinor * ((knights | bishops) & attacksByMinors).popcount();
-
-    // Penalty for all major threats against poorly supported minors
-    score += kThreatW.minorAttackedByMajor * (weakMinors & attacksByMajors).popcount();
-
-    // Penalty for pawn and minor threats against our rooks
-    score += kThreatW.rookAttackedByLesser * (rooks & (attacksByPawns | attacksByMinors)).popcount();
-
-    // Penalty for king threats against our poorly defended minors
-    score += kThreatW.minorAttackedByKing * (weakMinors & them.byKing).popcount();
-
-    // Penalty for king threats against our poorly defended rooks
-    score += kThreatW.rookAttackedByKing * (rooks & poorlyDefended & them.byKing).popcount();
-
-    // Penalty for any threat against our queens
-    score += kThreatW.queenAttackedByOne * (queens & them.all).popcount();
-
-    // Penalty for any overloaded minors or majors
-    score += kThreatW.overloadedPieces * overloaded.popcount();
-
-    // Bonus for giving threats by safe pawn pushes
-    score += kThreatW.byPawnPush * pushThreat.popcount();
-
+    // ThreatByMinor: minor ataca (defended|weak), soma por tipo de peça atacada.
+    Bitboard minorTargets = (defended | weak) & (us.byKnight | us.byBishop);
+    {
+        Bitboard bb = minorTargets;
+        while (bb.any()) {
+            Square sq = bb.poplsb();
+            PieceType pt = board.pieceOn(sq);
+            if (pt != PieceType::NONE) score += kThreatW.threatByMinor[int(pt)];
+        }
+    }
+    // ThreatByRook: rook ataca só `weak` (não defended).
+    {
+        Bitboard bb = weak & us.byRook;
+        while (bb.any()) {
+            Square sq = bb.poplsb();
+            PieceType pt = board.pieceOn(sq);
+            if (pt != PieceType::NONE) score += kThreatW.threatByRook[int(pt)];
+        }
+    }
+    // ThreatByKing: booleano, rei ataca pelo menos 1 peça weak.
+    if ((weak & us.byKing).any()) score += kThreatW.threatByKing;
+    // Hanging: weak adicionalmente totalmente indefeso OU não-peão atacado 2x por nós.
+    {
+        Bitboard hangBase = ~them.all | (nonPawnEnemiesReal & us.all2);
+        score += kThreatW.hanging * (weak & hangBase).popcount();
+    }
+    // WeakQueenProtection: entre as weak, quantas só a dama inimiga defende.
+    score += kThreatW.weakQueenProt * (weak & them.byQueen).popcount();
+    // RestrictedPiece: casas que o inimigo ocupa/defende, não fortemente protegidas, que
+    // nós também atacamos -- restringe a mobilidade das peças inimigas nessas casas.
+    {
+        Bitboard restricted = them.all & ~stronglyProtected & us.all;
+        score += kThreatW.restrictedPiece * restricted.popcount();
+    }
+    Bitboard safe = ~them.all | us.all;
+    // ThreatBySafePawn: peões nossos em casas safe atacando peças inimigas não-peão.
+    {
+        Bitboard safePawns = board.pieces(side, PieceType::PAWN) & safe;
+        Bitboard pawnAtk = (side == Color::WHITE) ? attacks::pawnAttacks<Color::WHITE>(safePawns)
+                                                   : attacks::pawnAttacks<Color::BLACK>(safePawns);
+        score += kThreatW.threatBySafePawn * (pawnAtk & nonPawnEnemiesReal).popcount();
+    }
+    // ThreatByPawnPush: peões nossos que poderiam empurrar (1 ou 2 casas, se ainda na
+    // rank inicial) para uma casa safe e não atacada por peão inimigo, e dali atacariam
+    // uma peça inimiga não-peão -- ameaça "latente", ainda não realizada.
+    {
+        Bitboard occ = board.allOcc;
+        Bitboard ownPawns = board.pieces(side, PieceType::PAWN);
+        Bitboard push1, push2;
+        if (side == Color::WHITE) {
+            push1 = Bitboard(ownPawns.value() << 8) & ~occ;
+            Bitboard startRank2 = Bitboard(ownPawns.value() & 0x000000000000FF00ULL);
+            push2 = Bitboard((Bitboard(startRank2.value() << 8) & ~occ).value() << 8) & ~occ;
+        } else {
+            push1 = Bitboard(ownPawns.value() >> 8) & ~occ;
+            Bitboard startRank7 = Bitboard(ownPawns.value() & 0x00FF000000000000ULL);
+            push2 = Bitboard((Bitboard(startRank7.value() >> 8) & ~occ).value() >> 8) & ~occ;
+        }
+        Bitboard pushTargets = (push1 | push2) & safe & ~them.byPawn;
+        Bitboard pushAtk = (side == Color::WHITE) ? attacks::pawnAttacks<Color::WHITE>(pushTargets)
+                                                   : attacks::pawnAttacks<Color::BLACK>(pushTargets);
+        score += kThreatW.threatByPawnPush * (pushAtk & nonPawnEnemiesReal).popcount();
+    }
+    // KnightOnQueen / SliderOnQueen: só fazem sentido com exatamente 1 dama inimiga.
+    Bitboard enemyQueens = board.pieces(enemy, PieceType::QUEEN);
+    if (enemyQueens.popcount() == 1) {
+        Square eqSq = enemyQueens.lsb();
+        Bitboard ownPawns = board.pieces(side, PieceType::PAWN);
+        Bitboard localSafe = ~ownPawns & ~stronglyProtected;
+        bool queenImbalance = board.pieces(side, PieceType::QUEEN).popcount() == 1;
+        int mult = queenImbalance ? 2 : 1;
+        // KnightOnQueen: temos um cavalo que ataca a casa da dama (via padrão de salto
+        // de cavalo a partir dessa casa, simétrico) E essa casa está localSafe.
+        {
+            Bitboard knightFromQueen = attacks::knightAttacks(eqSq);
+            Bitboard cnt = us.byKnight & knightFromQueen & localSafe;
+            score += kThreatW.knightOnQueen * cnt.popcount() * mult;
+        }
+        // SliderOnQueen: bispo/torre nossos atacam a casa da dama através de uma casa
+        // que é localSafe E está atacada 2x por nós (caminho duplamente apoiado).
+        {
+            Bitboard occ = board.allOcc;
+            Bitboard sliderFromQueen = attacks::bishopAttacks(eqSq, occ) | attacks::rookAttacks(eqSq, occ);
+            Bitboard cnt = (us.byBishop | us.byRook) & sliderFromQueen & localSafe & us.all2;
+            score += kThreatW.sliderOnQueen * cnt.popcount() * mult;
+        }
+    }
     return score;
 }
 
@@ -757,22 +744,23 @@ static int staticEval(const Board& board) {
     if (napoleon::nnue::isLoaded()) {
         score = napoleon::nnue::evaluate(board);
     } else {
-        // HCE (sem rede NNUE): valores e lógica REAIS do Ethereal (ver comentário grande
-        // acima das tabelas kPsqt*) -- material + PSQT separados, mais os termos de
-        // threats/mobility/king safety/pawn structure/bishop/outpost/rook abaixo, todos
-        // tapered mg/eg pela fase do jogo (gamePhase() acima).
-        // Convenção de squares: igual à do Ethereal (LERF, a1=0). Brancas leem kPsqt[pt][sq]
-        // diretamente; pretas leem espelhado verticalmente (sq^56) -- mesma coisa que
-        // relativeSquare(BLACK, sq) no Ethereal real.
+        // HCE (sem rede NNUE): PSQT calibrado (já inclui o valor de
+        // material implícito, ver comentário acima das tabelas -- NÃO soma material à
+        // parte, duplicaria) + termos de threats + mobility, todos calibrados juntos via
+        // Texel tuning a partir de posições reais, cada um agora como par {mg,eg}
+        // interpolado pela fase do jogo (ver comentário em Score/gamePhase acima).
+        // Convenção do motor: sq=0 é a1 (rank1), a tabela está escrita com linha 0 =
+        // rank8 — por isso brancas leem sq^56 (inverte o rank), pretas leem sq
+        // diretamente (simetria especular completa).
         Score s;
         for (int pt = 0; pt < 6; ++pt) {
             Bitboard wp = board.pieceBB[0][pt];
             int wc = wp.popcount();
-            while (wp.any()) s += kPsqt[pt][wp.poplsb().value()];
+            while (wp.any()) s += kPsqt[pt][wp.poplsb().value() ^ 56];
             s += kMaterial[pt] * wc;
             Bitboard bp = board.pieceBB[1][pt];
             int bc = bp.popcount();
-            while (bp.any()) s -= kPsqt[pt][bp.poplsb().value() ^ 56];
+            while (bp.any()) s -= kPsqt[pt][bp.poplsb().value()];
             s -= kMaterial[pt] * bc;
         }
         AttackInfo whiteAtk = computeAttackInfo(board, Color::WHITE);
@@ -785,6 +773,8 @@ static int staticEval(const Board& board) {
         s -= computeKingSafetyScore(board, Color::BLACK, blackAtk, whiteAtk);
         s += computePawnStructureScore(board, Color::WHITE);
         s -= computePawnStructureScore(board, Color::BLACK);
+        s += computeWeakQueenScore(board, Color::WHITE);
+        s -= computeWeakQueenScore(board, Color::BLACK);
         s += computeBishopScore(board, Color::WHITE);
         s -= computeBishopScore(board, Color::BLACK);
         s += computeOutpostScore(board, Color::WHITE, whiteAtk);
@@ -792,22 +782,30 @@ static int staticEval(const Board& board) {
         s += computeRookScore(board, Color::WHITE);
         s -= computeRookScore(board, Color::BLACK);
         // Interpolação MG/EG pela fase do jogo (material restante) -- ver gamePhase().
-        // 🦅 Sem reescala global: ao contrário da calibração própria anterior (cujo PSQT
-        // tinha médias bem menores que kPieceValue, exigindo um fator HCE_RESCALE=1.5 ad-hoc
-        // para as margens de poda fazerem sentido), os valores reais do Ethereal já estão na
-        // escala "padrão" de centipawns (PawnValue=82/144, QueenValue=1292/1623 -- mesma
-        // ordem de grandeza que kPieceValue usado no resto da busca). Nenhuma reescala
-        // adicional é necessária.
         int phase = gamePhase(board);
         int sTapered = (s.mg * phase + s.eg * (MAX_PHASE - phase)) / MAX_PHASE;
+        // 🦅 Reescala global do HCE: o PSQT calibrado tem médias bem menores que
+        // kPieceValue (Dama≈574 vs 975, Cavalo≈182 vs 325 -- fator ~1.5x médio entre
+        // peças). kPieceValue é usado em VÁRIOS sítios da busca somado DIRETAMENTE ao
+        // eval (delta pruning, capture futility) e TODAS as margens de poda fixas (RFP,
+        // NMP, futility de quietos, SE_MARGIN, razoring) foram pensadas/calibradas
+        // implicitamente para a escala "padrão" que kPieceValue representa. Sem
+        // reescalar, estas podas ficam muito menos agressivas com o HCE (o eval "parece"
+        // sempre mais próximo de alfa/beta do que devia), confirmado como causa real de
+        // explosões de nós (depth16→17 do startpos: 2.2M→125M nós, 152s). Multiplicar
+        // aqui em vez de criar tabelas alternativas em cada sítio: corrige TODAS as
+        // margens de uma vez, mantendo o resto do código (SEE, MVV-LVA, kPieceValue)
+        // intocado -- só staticEval() muda de escala.
+        static constexpr double HCE_RESCALE = 1.5;
+        sTapered = (int)(sTapered * HCE_RESCALE);
         score = board.sideToMove() == Color::WHITE ? sTapered : -sTapered;
-        // Tempo: bónus por ser a vez de jogar -- adicionado DEPOIS da conversão de
-        // perspetiva (sempre a favor de quem joga agora, não sempre Brancas). O Ethereal
-        // real usa um valor FIXO Tempo=20 (não tapered, não Score{mg,eg}) -- mantemos
-        // kTempoBonus como Score{20,20} (mg==eg) só por consistência de tipo com o resto do
-        // sistema, sem custo extra (interpola para o mesmo valor 20 em qualquer fase).
+        // Tempo: bónus por ser a vez de jogar -- interpolado pela MESMA fase, mas
+        // adicionado DEPOIS da conversão de perspetiva (sempre a favor de quem joga
+        // agora, não sempre Brancas). Conceito confirmado no Ethereal real
+        // (src/evaluate.c), que o usa flat/não-tapered -- mantemos par mg/eg por
+        // consistência com o resto do sistema de calibração, sem custo extra.
         int tempoTapered = (kTempoBonus.mg * phase + kTempoBonus.eg * (MAX_PHASE - phase)) / MAX_PHASE;
-        score += tempoTapered;
+        score += (int)(tempoTapered * HCE_RESCALE);
     }
     // Escala pelo halfmove clock: aproxima a regra dos 50 lances — a eval
     // perde força à medida que o contador sobe (posição a tender a empate).
