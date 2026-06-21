@@ -213,13 +213,13 @@ static AttackInfo computeAttackInfo(const Board& board, Color side) {
 // Pesos treináveis via texel_tuner (training/texel_tuner/), valores iniciais = (mg=eg=
 // valor da calibragem anterior sem fase) até ao próximo retreino com tapered eval.
 struct ThreatWeights {
-    Score threatByMinor[6] = {{7,6},{20,35},{43,25},{6,122},{-54,490},{-37,-87}};
-    Score threatByRook[6]  = {{10,20},{-2,32},{13,45},{-3,16},{-93,483},{-63,-119}};
+    Score threatByMinor[6] = {{108,6},{121,35},{144,25},{107,122},{47,490},{64,-87}};
+    Score threatByRook[6]  = {{112,20},{100,32},{115,45},{99,16},{9,483},{39,-119}};
     Score threatByKing      = {54,50};
     Score hanging           = {23,43};
     Score weakQueenProt     = {8,-7};
     Score restrictedPiece   = {4,-3};
-    Score threatBySafePawn  = {40,137};
+    Score threatBySafePawn = {137,137};
     // 🦅 Completam os 11 termos reais do threats() clássico do SF (sf_12..sf_16) -- os 4
     // que faltavam (mais raros/marginais, mas o motor agora vai ao máximo, não fica a
     // meio): ThreatByPawnPush, KnightOnQueen, SliderOnQueen, WeakQueen.
@@ -238,10 +238,10 @@ static const ThreatWeights kThreatW;
 // clássica). Tamanhos das tabelas = máximo de casas alcançáveis por tipo de peça
 // (Knight≤8, Bishop≤13, Rook≤14, Queen≤27 -- +1 cada p/ incluir o 0).
 struct MobilityWeights {
-    Score knight[9]  = {{3,147},{27,198},{25,232},{28,245},{33,259},{40,260},{49,257},{42,253},{39,259}};
-    Score bishop[14] = {{11,221},{33,212},{51,232},{57,244},{58,256},{56,261},{58,271},{62,259},{56,261},{49,259},{59,262},{86,259},{70,260},{104,249}};
-    Score rook[15]   = {{18,381},{35,361},{39,362},{43,373},{38,391},{43,388},{38,403},{37,398},{30,404},{31,406},{36,411},{37,409},{35,409},{46,396},{58,392}};
-    Score queen[28]  = {{-132,926},{-120,839},{-111,760},{-103,755},{-102,788},{-101,768},{-100,782},{-93,795},{-91,791},{-85,784},{-90,799},{-83,806},{-93,799},{-93,810},{-93,815},{-98,799},{-93,804},{-93,795},{-82,788},{-64,773},{-41,756},{-49,751},{-8,687},{93,644},{71,632},{136,604},{320,446},{231,546}};
+    Score knight[9]  = {{206,147},{230,198},{228,232},{231,245},{236,259},{243,260},{252,257},{245,253},{242,259}};
+    Score bishop[14] = {{204,221},{226,212},{244,232},{250,244},{251,256},{249,261},{251,271},{255,259},{249,261},{242,259},{252,262},{279,259},{263,260},{297,249}};
+    Score rook[15]   = {{373,381},{390,361},{394,362},{398,373},{393,391},{398,388},{393,403},{392,398},{385,404},{386,406},{391,411},{392,409},{390,409},{401,396},{413,392}};
+    Score queen[28]  = {{661,926},{673,839},{682,760},{690,755},{691,788},{692,768},{693,782},{700,795},{702,791},{708,784},{703,799},{710,806},{700,799},{700,810},{700,815},{695,799},{700,804},{700,795},{711,788},{729,773},{752,756},{744,751},{785,687},{886,644},{864,632},{929,604},{1113,446},{1024,546}};
 };
 static const MobilityWeights kMobilityW;
 
@@ -260,7 +260,7 @@ struct KingSafetyWeights {
     // RFP/NMP/etc precisam para podar bem, causando uma explosão real de nós (depth12
     // >15x depth11 numa posição encontrada na validação). Suavizado por interpolação
     // linear entre os pontos estáveis vizinhos (32 e 41) + cap em ±300mg/±400eg.
-    Score attackUnits[50] = {{17,-25},{30,18},{14,-7},{19,17},{21,-2},{23,0},{9,7},{13,-2},{12,-9},{17,-25},{26,-5},{10,-9},{24,-41},{-13,-22},{-5,-42},{19,-57},{-3,-41},{-7,-63},{-12,-63},{-20,-85},{-50,-4},{-57,-15},{-53,-41},{-55,-56},{-58,-48},{-21,-54},{-116,15},{-60,-23},{-123,8},{-127,7},{-127,19},{-128,31},{-210,149},{-219,197},{-228,244},{-238,292},{-247,339},{-256,387},{-265,400},{-275,400},{-284,400},{-293,400},{-158,247},{-150,135},{-46,171},{-74,15},{-47,29},{-42,12},{-27,-7},{-12,26}};
+    Score attackUnits[50] = {{158,-25},{171,18},{155,-7},{160,17},{162,-2},{164,0},{150,7},{154,-2},{153,-9},{158,-25},{167,-5},{151,-9},{165,-41},{128,-22},{136,-42},{160,-57},{138,-41},{134,-63},{129,-63},{121,-85},{91,-4},{84,-15},{88,-41},{86,-56},{83,-48},{120,-54},{25,15},{81,-23},{18,8},{14,7},{14,19},{13,31},{-69,149},{-78,197},{-87,244},{-97,292},{-106,339},{-115,387},{-124,400},{-134,400},{-143,400},{-152,400},{-17,247},{-9,135},{95,171},{67,15},{94,29},{99,12},{114,-7},{129,26}};
     Score pawnShieldMissing[4] = {{15,-12},{5,-4},{-7,0},{-14,4}};
     // 🦅 Safe check detection (Ethereal real, src/evaluate.c): distingue "muitos
     // atacantes sem entrada" de "rede de mate disponível" -- conta, por tipo de peça
@@ -276,7 +276,7 @@ static const KingSafetyWeights kKingSafetyW;
 // agora (mais complexo de definir corretamente -- precisa de saber se a casa de avanço
 // está controlada pelo inimigo E se nenhum peão adjacente já avançou).
 struct PawnStructureWeights {
-    Score passed[8]   = {{0,0},{-93,-20},{-102,0},{-94,35},{-64,47},{-32,90},{53,234},{0,0}};
+    Score passed[8]   = {{90,0},{-3,-20},{-12,0},{-4,35},{26,47},{58,90},{143,234},{90,0}};
     Score isolated    = {-11,-2};
     Score doubled     = {-17,-15};
     // 🦅 Completam o quadro clássico de pawn structure (inspirados no Ethereal real,
@@ -311,7 +311,7 @@ static const OutpostWeights kOutpostW;
 struct RookWeights {
     Score openFile     = {37,-4};
     Score semiOpenFile = {25,4};
-    Score seventhRank  = {-20,40};
+    Score seventhRank = {40,40};
 };
 static const RookWeights kRookW;
 
