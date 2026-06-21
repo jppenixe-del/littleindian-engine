@@ -266,11 +266,49 @@ struct PawnStructureWeights {
     Score passed[8]   = {};  // indexado pela rank do peão (relativa à perspetiva, 0=própria 1ª fileira)
     Score isolated    = {};
     Score doubled     = {};
+    // 🦅 Completam o quadro clássico de pawn structure (inspirados no Ethereal real,
+    // src/evaluate.c, reimplementados do zero com pesos próprios):
+    Score backward       = {};  // peão sem vizinhos atrás dele, casa de avanço atacada por peão inimigo
+    Score candidatePasser = {}; // não passado ainda, mas ficaria passado depois duma troca planeada (simplificado)
+    Score passedKingDist[2] = {}; // [0]=distância ao NOSSO rei, [1]=distância ao rei inimigo (por casa de distância, capado)
+    Score passedSafeAdvance = {}; // a casa de avanço do peão passado não está ocupada nem atacada pelo inimigo
 };
 static const PawnStructureWeights kPawnStructW;
+
+// Bispo/cavalo: par de bispos, bispo na diagonal longa central (sem bloqueio), peões
+// "rammed" (travados, mesma cor da casa do bispo) -- nenhum destes existia antes,
+// confirmado zero no nosso código contra o Ethereal real.
+struct BishopWeights {
+    Score pair          = {};
+    Score longDiagonal   = {};
+    Score rammedPawn     = {};  // por peão próprio "rammed" (bloqueado por peão inimigo) na cor do bispo
+};
+static const BishopWeights kBishopW;
+
+// Outpost: cavalo/bispo numa casa defendida por peão próprio, inalcançável por peões
+// inimigos (nenhum peão inimigo pode chegar a uma casa que o ataque), ranks 4-6.
+struct OutpostWeights {
+    Score knight = {};
+    Score bishop = {};
+};
+static const OutpostWeights kOutpostW;
+
+// Rook: coluna aberta (sem peões de ninguém) / semi-aberta (sem peão próprio, peão
+// inimigo presente) / 7ª fila (só conta se o rei inimigo ainda está nas 2 últimas filas).
+struct RookWeights {
+    Score openFile     = {};
+    Score semiOpenFile = {};
+    Score seventhRank  = {};
+};
+static const RookWeights kRookW;
+
+static int kTempoBonus = 0;  // bónus plano por ser a vez de jogar (não tapered -- escalar simples)
 static Score computePawnStructureScore(const Board& board, Color side) {
     Bitboard ownPawns = board.pieces(side, PieceType::PAWN);
     Bitboard enemyPawns = board.pieces(~side, PieceType::PAWN);
+    Square ownKing = board.kingSq(side);
+    Square enemyKing = board.kingSq(~side);
+    Bitboard occ = board.allOcc;
     Score score;
     Bitboard bb = ownPawns;
     while (bb.any()) {
@@ -295,21 +333,158 @@ static Score computePawnStructureScore(const Board& board, Color side) {
         }
         if (!hasNeighbor) score += kPawnStructW.isolated;
 
+        // Backward: tem vizinhos (não isolado), mas nenhum peão próprio nas colunas
+        // [file-1,file,file+1] está "atrás" dele (mesma rank ou mais atrás) -- é o mais
+        // atrasado do grupo -- E a casa de avanço imediata é atacada por peão inimigo.
+        if (hasNeighbor) {
+            bool mostBackward = true;
+            for (int df = -1; df <= 1 && mostBackward; ++df) {
+                int f = file + df;
+                if (f < 0 || f > 7) continue;
+                int rStart = (side == Color::WHITE) ? 0 : rank;
+                int rEnd   = (side == Color::WHITE) ? rank : 8;
+                for (int r = rStart; r < rEnd; ++r) {
+                    if (df == 0 && r == rank) continue;
+                    if (ownPawns.test(Square((r << 3) | f).value())) { mostBackward = false; break; }
+                }
+            }
+            if (mostBackward) {
+                int advRank = (side == Color::WHITE) ? rank + 1 : rank - 1;
+                bool advanceAttacked = false;
+                if (advRank >= 0 && advRank < 8) {
+                    // Casa de avanço atacada por peão inimigo: testa diretamente as duas
+                    // diagonais de captura inimigas que apontam para essa casa.
+                    int ef = file - 1, ef2 = file + 1;
+                    int enemyRank = (side == Color::WHITE) ? advRank - 1 : advRank + 1;
+                    if (enemyRank >= 0 && enemyRank < 8) {
+                        if (ef >= 0 && enemyPawns.test(Square((enemyRank << 3) | ef).value())) advanceAttacked = true;
+                        if (ef2 <= 7 && enemyPawns.test(Square((enemyRank << 3) | ef2).value())) advanceAttacked = true;
+                    }
+                }
+                if (advanceAttacked) score += kPawnStructW.backward;
+            }
+        }
+
         // Passed: nenhum peão inimigo nas colunas [file-1,file,file+1], em qualquer rank
         // "à frente" deste peão (rank maior para brancas, menor para pretas).
         bool passed = true;
+        bool ownFileBlocked = false;
         for (int df = -1; df <= 1 && passed; ++df) {
             int f = file + df;
             if (f < 0 || f > 7) continue;
             int rStart = (side == Color::WHITE) ? rank + 1 : 0;
             int rEnd   = (side == Color::WHITE) ? 8 : rank;
             for (int r = rStart; r < rEnd; ++r)
-                if (enemyPawns.test(Square((r << 3) | f).value())) { passed = false; break; }
+                if (enemyPawns.test(Square((r << 3) | f).value())) {
+                    passed = false;
+                    if (df == 0) ownFileBlocked = true;
+                }
         }
         if (passed) {
             int relRank = (side == Color::WHITE) ? rank : 7 - rank;
             score += kPawnStructW.passed[relRank];
+            int distOwn = std::max(std::abs(file - ownKing.file()), std::abs(rank - ownKing.rank()));
+            int distEnemy = std::max(std::abs(file - enemyKing.file()), std::abs(rank - enemyKing.rank()));
+            score += kPawnStructW.passedKingDist[0] * distOwn;
+            score += kPawnStructW.passedKingDist[1] * distEnemy;
+            int advRank = (side == Color::WHITE) ? rank + 1 : rank - 1;
+            if (advRank >= 0 && advRank < 8 && !occ.test(Square((advRank << 3) | file).value()))
+                score += kPawnStructW.passedSafeAdvance;
+        } else if (!ownFileBlocked) {
+            // Candidate passer: só está "bloqueado" pelas colunas adjacentes, não pela
+            // própria -- simplificação razoável de "ficaria passado depois duma troca".
+            int relRank = (side == Color::WHITE) ? rank : 7 - rank;
+            score += kPawnStructW.candidatePasser * (relRank >= 3 ? 1 : 0);
         }
+    }
+    return score;
+}
+
+// Bishop pair / long diagonal / rammed pawns -- ver comentário na struct BishopWeights.
+static Score computeBishopScore(const Board& board, Color side) {
+    Score score;
+    Bitboard ownBishops = board.pieces(side, PieceType::BISHOP);
+    if (ownBishops.popcount() >= 2) score += kBishopW.pair;
+    Bitboard ownPawns = board.pieces(side, PieceType::PAWN);
+    Bitboard enemyPawns = board.pieces(~side, PieceType::PAWN);
+    static constexpr uint64_t kLightSquares = 0x55AA55AA55AA55AAULL;
+    Bitboard bb = ownBishops;
+    while (bb.any()) {
+        Square sq = bb.poplsb();
+        bool light = (kLightSquares >> sq.value()) & 1;
+        // Long diagonal central: bispo numa das 2 diagonais principais (a1-h8/a8-h1) E
+        // sem peças próprias a bloquear nas 2 casas centrais dessa diagonal.
+        bool onA1H8 = (sq.file() == sq.rank());
+        bool onA8H1 = (sq.file() + sq.rank() == 7);
+        if (onA1H8 || onA8H1) {
+            // Casas centrais da diagonal a1-h8: d4(27)/e5(36). Da a8-h1: d5(35)/e4(28).
+            Bitboard centerSquares = onA1H8 ? Bitboard::fromSquare(Square(27)) | Bitboard::fromSquare(Square(36))
+                                             : Bitboard::fromSquare(Square(35)) | Bitboard::fromSquare(Square(28));
+            if (!(board.allOcc & centerSquares & ~Bitboard::fromSquare(sq)).any()) score += kBishopW.longDiagonal;
+        }
+        // Rammed pawns: peões PRÓPRIOS imediatamente bloqueados por um peão INIMIGO
+        // mesmo em frente, na mesma cor de casa do bispo.
+        Bitboard sameColor = Bitboard(light ? kLightSquares : ~kLightSquares);
+        Bitboard rammed = ownPawns & sameColor;
+        Bitboard rb = rammed;
+        while (rb.any()) {
+            Square psq = rb.poplsb();
+            int aheadRank = (side == Color::WHITE) ? psq.rank() + 1 : psq.rank() - 1;
+            if (aheadRank < 0 || aheadRank > 7) continue;
+            if (enemyPawns.test(Square((aheadRank << 3) | psq.file()).value())) score += kBishopW.rammedPawn;
+        }
+    }
+    return score;
+}
+
+// Outpost: cavalo/bispo numa casa defendida por peão próprio, em rank 4-6 (relativa),
+// que NENHUM peão inimigo pode atacar (nas colunas adjacentes, à frente, em nenhuma rank).
+static Score computeOutpostScore(const Board& board, Color side, const AttackInfo& us) {
+    Bitboard enemyPawns = board.pieces(~side, PieceType::PAWN);
+    Score score;
+    auto isOutpost = [&](Square sq) -> bool {
+        int relRank = (side == Color::WHITE) ? sq.rank() : 7 - sq.rank();
+        if (relRank < 3 || relRank > 5) return false;
+        if (!us.byPawn.test(sq.value())) return false;  // defendido por peão próprio
+        int file = sq.file(), rank = sq.rank();
+        for (int df = -1; df <= 1; df += 2) {
+            int f = file + df;
+            if (f < 0 || f > 7) continue;
+            int rStart = (side == Color::WHITE) ? rank + 1 : 0;
+            int rEnd   = (side == Color::WHITE) ? 8 : rank;
+            for (int r = rStart; r < rEnd; ++r)
+                if (enemyPawns.test(Square((r << 3) | f).value())) return false;
+        }
+        return true;
+    };
+    Bitboard bb = board.pieces(side, PieceType::KNIGHT);
+    while (bb.any()) { Square sq = bb.poplsb(); if (isOutpost(sq)) score += kOutpostW.knight; }
+    bb = board.pieces(side, PieceType::BISHOP);
+    while (bb.any()) { Square sq = bb.poplsb(); if (isOutpost(sq)) score += kOutpostW.bishop; }
+    return score;
+}
+
+// Rook: coluna aberta/semi-aberta, 7ª fila (só se o rei inimigo ainda não saiu das 2
+// últimas filas -- bónus de pressão num rei ainda não "fugido").
+static Score computeRookScore(const Board& board, Color side) {
+    Bitboard ownPawns = board.pieces(side, PieceType::PAWN);
+    Bitboard enemyPawns = board.pieces(~side, PieceType::PAWN);
+    Square enemyKing = board.kingSq(~side);
+    int enemyKingRelRank = (side == Color::WHITE) ? enemyKing.rank() : 7 - enemyKing.rank();
+    Score score;
+    Bitboard bb = board.pieces(side, PieceType::ROOK);
+    while (bb.any()) {
+        Square sq = bb.poplsb();
+        int file = sq.file(), rank = sq.rank();
+        bool ownOnFile = false, enemyOnFile = false;
+        for (int r = 0; r < 8; ++r) {
+            if (ownPawns.test(Square((r << 3) | file).value())) ownOnFile = true;
+            if (enemyPawns.test(Square((r << 3) | file).value())) enemyOnFile = true;
+        }
+        if (!ownOnFile && !enemyOnFile) score += kRookW.openFile;
+        else if (!ownOnFile && enemyOnFile) score += kRookW.semiOpenFile;
+        int relRank = (side == Color::WHITE) ? rank : 7 - rank;
+        if (relRank == 6 && enemyKingRelRank >= 6) score += kRookW.seventhRank;
     }
     return score;
 }
@@ -551,6 +726,12 @@ static int staticEval(const Board& board) {
         s -= computePawnStructureScore(board, Color::BLACK);
         s += computeWeakQueenScore(board, Color::WHITE);
         s -= computeWeakQueenScore(board, Color::BLACK);
+        s += computeBishopScore(board, Color::WHITE);
+        s -= computeBishopScore(board, Color::BLACK);
+        s += computeOutpostScore(board, Color::WHITE, whiteAtk);
+        s -= computeOutpostScore(board, Color::BLACK, blackAtk);
+        s += computeRookScore(board, Color::WHITE);
+        s -= computeRookScore(board, Color::BLACK);
         // Interpolação MG/EG pela fase do jogo (material restante) -- ver gamePhase().
         int phase = gamePhase(board);
         int sTapered = (s.mg * phase + s.eg * (MAX_PHASE - phase)) / MAX_PHASE;
@@ -569,6 +750,10 @@ static int staticEval(const Board& board) {
         static constexpr double HCE_RESCALE = 1.5;
         sTapered = (int)(sTapered * HCE_RESCALE);
         score = board.sideToMove() == Color::WHITE ? sTapered : -sTapered;
+        // Tempo: bónus plano por ser a vez de jogar -- adicionado DEPOIS da conversão de
+        // perspetiva (sempre a favor de quem joga agora, confirmado no Ethereal real,
+        // src/evaluate.c, presente e simples, não tapered por design deles).
+        score += kTempoBonus;
     }
     // Escala pelo halfmove clock: aproxima a regra dos 50 lances — a eval
     // perde força à medida que o contador sobe (posição a tender a empate).
