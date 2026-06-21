@@ -374,7 +374,11 @@ static Score computePawnStructureScore(const Board& board, Color side) {
         // "à frente" deste peão (rank maior para brancas, menor para pretas).
         bool passed = true;
         bool ownFileBlocked = false;
-        for (int df = -1; df <= 1 && passed; ++df) {
+        // 🦅 FIX: o "&& passed" aqui cortava o loop a meio quando df=-1 já marcava
+        // passed=false, NUNCA chegando a df=0 -- ownFileBlocked ficava sempre false
+        // mesmo quando a própria coluna TINHA um bloqueador (confirmado divergente do
+        // Rust tuner, que não tem este early-exit, via revisão estrutural do Opus).
+        for (int df = -1; df <= 1; ++df) {
             int f = file + df;
             if (f < 0 || f > 7) continue;
             int rStart = (side == Color::WHITE) ? rank + 1 : 0;
@@ -497,7 +501,10 @@ static Score computeRookScore(const Board& board, Color side) {
 // "unidades de ataque" antes de indexar a tabela; o ganho/perigo REAL fica todo nos pesos
 // treináveis kKingSafetyW.attackUnits[]). Convenção clássica SF: dama pesa mais que torre,
 // que pesa mais que menor.
-static constexpr int kKingAttackWeight[6] = { 0, 2, 2, 3, 5, 0 };  // pawn,knight,bishop,rook,queen,king
+// 🦅 FIX: pawn era 0 aqui mas 1 no Rust tuner (texel_tuner_main.rs KING_ATTACK_WEIGHT) --
+// divergência silenciosa confirmada via revisão estrutural do Opus: o tuner indexava
+// attackUnits[] num índice diferente do que o motor usa de facto. Alinhado a 1 em ambos.
+static constexpr int kKingAttackWeight[6] = { 1, 2, 2, 3, 5, 0 };  // pawn,knight,bishop,rook,queen,king
 static Score computeKingSafetyScore(const Board& board, Color side, const AttackInfo& us, const AttackInfo& them) {
     Square ksq = board.kingSq(side);
     Bitboard ring = attacks::kingAttacks(ksq) | Bitboard::fromSquare(ksq);
