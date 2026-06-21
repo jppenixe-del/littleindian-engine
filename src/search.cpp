@@ -307,7 +307,7 @@ struct RookWeights {
 };
 static const RookWeights kRookW;
 
-static int kTempoBonus = 0;  // bónus plano por ser a vez de jogar (não tapered -- escalar simples)
+static Score kTempoBonus = {};  // bónus por ser a vez de jogar -- par mg/eg, ver uso em staticEval()
 static Score computePawnStructureScore(const Board& board, Color side) {
     Bitboard ownPawns = board.pieces(side, PieceType::PAWN);
     Bitboard enemyPawns = board.pieces(~side, PieceType::PAWN);
@@ -770,10 +770,13 @@ static int staticEval(const Board& board) {
         static constexpr double HCE_RESCALE = 1.5;
         sTapered = (int)(sTapered * HCE_RESCALE);
         score = board.sideToMove() == Color::WHITE ? sTapered : -sTapered;
-        // Tempo: bónus plano por ser a vez de jogar -- adicionado DEPOIS da conversão de
-        // perspetiva (sempre a favor de quem joga agora, confirmado no Ethereal real,
-        // src/evaluate.c, presente e simples, não tapered por design deles).
-        score += kTempoBonus;
+        // Tempo: bónus por ser a vez de jogar -- interpolado pela MESMA fase, mas
+        // adicionado DEPOIS da conversão de perspetiva (sempre a favor de quem joga
+        // agora, não sempre Brancas). Conceito confirmado no Ethereal real
+        // (src/evaluate.c), que o usa flat/não-tapered -- mantemos par mg/eg por
+        // consistência com o resto do sistema de calibração, sem custo extra.
+        int tempoTapered = (kTempoBonus.mg * phase + kTempoBonus.eg * (MAX_PHASE - phase)) / MAX_PHASE;
+        score += (int)(tempoTapered * HCE_RESCALE);
     }
     // Escala pelo halfmove clock: aproxima a regra dos 50 lances — a eval
     // perde força à medida que o contador sobe (posição a tender a empate).
