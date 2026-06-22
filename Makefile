@@ -13,6 +13,7 @@ LDFLAGS  =
 
 # Embedded net (pass NET= to embed)
 NET ?= nets/littleindian_1024.napk9
+EXE ?= littleindian
 
 SRC_CORE = src/main.cpp src/attacks.cpp src/board.cpp src/movegen.cpp src/uci.cpp src/search.cpp
 
@@ -21,25 +22,25 @@ SRC_NNUE = src/napoleon/nnue_net.cpp src/napoleon/embedded_net.cpp src/napoleon/
 
 # ── F1 target: core engine, no embedded net (perft only) ─────────────────
 f1: $(SRC_CORE) $(SRC_NNUE)
-	$(CXX) $(CXXFLAGS) -o littleindian $^
+	$(CXX) $(CXXFLAGS) -o $(EXE) $^
 
 # ── native with embedded net ──────────────────────────────────────────────
 native-embed: $(SRC_CORE) $(SRC_NNUE)
 	$(CXX) $(CXXFLAGS) -march=native \
 	  -DEMBEDDED_NET_PATH=\"$(abspath $(NET))\" \
-	  -o littleindian $^
+	  -o $(EXE) $^
 
 # ── AVX2 build ────────────────────────────────────────────────────────────
 avx2-embed: $(SRC_CORE) $(SRC_NNUE)
 	$(CXX) $(CXXFLAGS) -mavx2 \
 	  -DEMBEDDED_NET_PATH=\"$(abspath $(NET))\" \
-	  -o littleindian $^
+	  -o $(EXE) $^
 
 # ── AVX-512 build ─────────────────────────────────────────────────────────
 avx512-embed: $(SRC_CORE) $(SRC_NNUE)
 	$(CXX) $(CXXFLAGS) -mavx512f -mavx512bw -mavx512vl \
 	  -DEMBEDDED_NET_PATH=\"$(abspath $(NET))\" \
-	  -o littleindian $^
+	  -o $(EXE) $^
 
 # ── PGO (profile-guided): 1) instrumenta, 2) corre bench p/ recolher o
 #    perfil, 3) recompila com o perfil. Usa native (-march=native) como base.
@@ -49,13 +50,13 @@ avx512-embed: $(SRC_CORE) $(SRC_NNUE)
 pgo-embed: $(SRC_CORE) $(SRC_NNUE)
 	$(CXX) $(CXXFLAGS) -march=native -fprofile-generate \
 	  -DEMBEDDED_NET_PATH=\"$(abspath $(NET))\" \
-	  -o littleindian $^
-	echo -e "bench 12\nquit" | ./littleindian
+	  -o $(EXE) $^
+	echo -e "bench 12\nquit" | ./$(EXE)
 	$(CXX) $(CXXFLAGS) -march=native -fprofile-use -fprofile-correction \
 	  -DEMBEDDED_NET_PATH=\"$(abspath $(NET))\" \
-	  -o littleindian $^
+	  -o $(EXE) $^
 	rm -f *.gcda
-	@echo "pgo-embed: build final em ./littleindian"
+	@echo "pgo-embed: build final em ./$(EXE)"
 
 clean:
 	rm -f littleindian littleindian.o *.gcda littleindian.pgo-gen
