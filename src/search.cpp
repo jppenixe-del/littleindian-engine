@@ -182,7 +182,11 @@ static const Score* const kPsqt[6] = { kPsqtPawn, kPsqtKnight, kPsqtBishop, kPsq
 // estrutural). Placeholder StockFish-like até a calibração v11_material (tuner Rust
 // reestruturado com OFF_MATERIAL) terminar e estes valores serem substituídos pelos
 // REAIS calibrados com esta nova estrutura.
-static const Score kMaterial[6] = { {82,144}, {426,475}, {441,510}, {627,803}, {1292,1623}, {0,0} };
+// 🦅 não-const: SPSA (training/spsa_tune.py) ajusta estes valores via UCI -- Texel tuning
+// calibra o eval contra um dataset estático (loss), SPSA calibra contra força de jogo real
+// (resultado de partidas), que é o que realmente importa e não correlacionou bem com loss
+// nas tentativas anteriores (ver gTunables mais abaixo). King fica {0,0} sempre, fora do tuning.
+static Score kMaterial[6] = { {82,144}, {426,475}, {441,510}, {627,803}, {1292,1623}, {0,0} };
 
 // HCE (sem rede NNUE), fase 2: termos de threats inspirados na estrutura conceptual do
 // threats() do Stockfish (src/evaluate.cpp, era clássica sf_12..sf_16 -- ideias/lista de
@@ -2082,6 +2086,19 @@ static const TunableParam gTunables[] = {
     { "BmStabilityMax",    &BM_STABILITY_MAX,    1,    16   },
     { "BmStabilityBaseX100", &BM_STABILITY_BASE_X100,  100, 250 },
     { "BmStabilityStepX1000", &BM_STABILITY_STEP_X1000, 0,   200 },
+    // 🦅 Material: Texel tuning (loss offline) não previu bem a força de jogo real entre
+    // âncoras diferentes -- deixa o SPSA decidir via partidas reais. Faixas largas (~±40%
+    // em torno do Ethereal) para não restringir à âncora original. King fica fora (sempre 0).
+    { "MatPawnMg",    &kMaterial[0].mg,  50,   130  },
+    { "MatPawnEg",    &kMaterial[0].eg,  90,   200  },
+    { "MatKnightMg",  &kMaterial[1].mg,  280,  520  },
+    { "MatKnightEg",  &kMaterial[1].eg,  300,  580  },
+    { "MatBishopMg",  &kMaterial[2].mg,  290,  540  },
+    { "MatBishopEg",  &kMaterial[2].eg,  330,  620  },
+    { "MatRookMg",    &kMaterial[3].mg,  420,  770  },
+    { "MatRookEg",    &kMaterial[3].eg,  540,  980  },
+    { "MatQueenMg",   &kMaterial[4].mg,  850,  1580 },
+    { "MatQueenEg",   &kMaterial[4].eg,  1080, 1980 },
 };
 static constexpr int N_TUNABLES = sizeof(gTunables) / sizeof(gTunables[0]);
 
