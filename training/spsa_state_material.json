@@ -1,0 +1,30 @@
+{
+ "iter": 56,
+ "theta": {
+  "MatPawnMg": 75.53767325595682,
+  "MatPawnEg": 140.2601430332715,
+  "MatKnightMg": 449.0459206934807,
+  "MatKnightEg": 496.9548892565776,
+  "MatBishopMg": 454.93267177793183,
+  "MatBishopEg": 465.42262879058853,
+  "MatRookMg": 602.3461290924827,
+  "MatRookEg": 764.3076058663094,
+  "MatQueenMg": 1326.6197115234424,
+  "MatQueenEg": 1586.8661546539913
+ },
+ "grupo": "MatPawnMg,MatPawnEg,MatKnightMg,MatKnightEg,MatBishopMg,MatBishopEg,MatRookMg,MatRookEg,MatQueenMg,MatQueenEg",
+ "params": [
+  "MatPawnMg",
+  "MatPawnEg",
+  "MatKnightMg",
+  "MatKnightEg",
+  "MatBishopMg",
+  "MatBishopEg",
+  "MatRookMg",
+  "MatRookEg",
+  "MatQueenMg",
+  "MatQueenEg"
+ ],
+ "ultimo_y": 0.375,
+ "ts": 1782162916.958092
+}

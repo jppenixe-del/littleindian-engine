@@ -26,3 +26,5 @@ littleindian.bloco*
 littleindian.stable
 littleindian.new
 nohup.out
+training/binpack_new/
+*.profraw
