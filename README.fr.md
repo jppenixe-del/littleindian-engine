@@ -1,26 +1,19 @@
 # littleindian
 
-**littleindian** est un moteur d'échecs UCI écrit à partir de zéro, **NNUE-natif dès le premier jour**, autour d'un format de réseau neuronal original appelé **NapK9**. Il n'y a aucun héritage d'évaluation manuelle (HCE) ni de code repris d'un autre moteur — plateau, génération de coups, recherche, table de transposition, gestion du temps et UCI sont tous du code original.
+**littleindian** est un moteur d'échecs UCI écrit à partir de zéro. Il dispose de deux évaluations : un réseau de neurones original (NNUE, format **NapK9**, encore en refonte active) et une évaluation manuelle (HCE) complète, calibrée par Texel tuning, sélectionnable à l'exécution avec `setoption name EvalFile value none`. Plateau, génération de coups, recherche, table de transposition, gestion du temps et UCI sont tous du code original.
 
-> **État : développement précoce.** Le moteur est aux phases F1/F2 de sa feuille de route (voir [Feuille de route](#feuille-de-route) ci-dessous) : la génération de coups est validée par perft et une recherche minimale appuyée sur le NNUE existe, mais les techniques de recherche au-delà d'un PVS basique sont encore ajoutées et validées une à la fois. Pas encore prêt pour la compétition.
+> **État : développement précoce.** Le moteur est aux phases F1/F2 de sa feuille de route (voir [Feuille de route](#feuille-de-route) ci-dessous) : la génération de coups est validée par perft et une recherche minimale existe, mais les techniques de recherche au-delà d'un PVS basique sont encore ajoutées et validées une à la fois. Pas encore prêt pour la compétition.
 
 Autres langues : [English](README.md) · [Português](README.pt.md)
 
 ---
 
-## Pourquoi « NNUE-natif »
+## Deux évaluations
 
-La plupart des moteurs NNUE ont greffé une évaluation par réseau de neurones sur une recherche réglée pour une évaluation manuelle, en conservant les anciens paramètres de recherche. littleindian évite cela délibérément : tous les paramètres de recherche (marges, réductions, gestion du temps) démarrent neutres et sont ajustés par SPSA/SPRT à l'échelle de score propre au réseau NapK9, plutôt que d'hériter de valeurs calibrées pour une autre évaluation. Voir [`docs/CLAUDE.md`](docs/CLAUDE.md) pour la justification complète de la conception.
+- **NNUE (NapK9)** : format propriétaire, en refonte active — l'architecture concrète (tailles de couches, buckets, caractéristiques) change entre les sessions d'entraînement, donc elle n'est pas documentée ici en détail pour éviter une information obsolète. Active par défaut quand un réseau est intégré au binaire.
+- **HCE** : PSQT + Matériel + Menaces + Mobilité + Sécurité du roi + Structure de pions, tous calibrés ensemble par Texel tuning sur des positions réelles (binpacks au format Stockfish). Active avec `setoption name EvalFile value none`. Utilisée comme référence de comparaison et dans des expériences de calibration menées en parallèle de celles du réseau.
 
-## Évaluation : NapK9
-
-- Format propriétaire, en-tête magique `NAPK9LEB`.
-- Feature transformer + accumulateur int16 (us/them), 8 *material buckets*, PSQT additif, `OUTPUT_SCALE_CP = 408`.
-- **Full threats** : `2(camp) × 2(attaque/défense) × 6(attaquant) × 6(victime) × 64(case) = 9216` caractéristiques, en plus des 22528 caractéristiques de pièces (31744 au total).
-- Accumulateur mis à jour de façon incrémentale (push sur `makeMove`, pop sur `unmakeMove`), validé contre une reconstruction complète (doit être identique bit à bit — voir `threattest`).
-- Le générateur de caractéristiques en Rust utilisé pour l'entraînement (`bullet_integration/napk9_v10_features.rs`) et celui en C++ (`gatherThreatsFull`) doivent toujours produire des index identiques. Cela est vérifié avec `training/calibra_threats.py`.
-
-Le réseau fourni dans `nets/littleindian_1024.napk9` est un travail original, entraîné avec l'outil d'entraînement propre au projet dans `bullet_integration/`.
+Tous les paramètres de recherche (marges, réductions, gestion du temps) sont ajustés par SPSA/SPRT, et non hérités d'un autre moteur. Voir [`docs/CLAUDE.md`](docs/CLAUDE.md) pour la justification complète de la conception.
 
 ## Compilation
 
@@ -46,7 +39,7 @@ Commandes UCI standard (`position`, `go`, `isready`, `setoption`, `quit`) plus q
 | Commande | Fonction |
 |---|---|
 | `perft N` | Vérifie la correction/vitesse du générateur de coups jusqu'à la profondeur N |
-| `eval` | Évaluation statique de la position actuelle (NapK9, du point de vue du joueur au trait) |
+| `eval` | Évaluation statique de la position actuelle, du point de vue du joueur au trait (NNUE seulement) |
 | `bench` | Recherche fixe sur un ensemble de positions intégré — utilisé comme signature de régression nœuds/nps |
 | `threattest` | Valide l'accumulateur incrémental contre une reconstruction complète (doit indiquer `diff = 0`) |
 | `d` | Affiche le plateau et le FEN |

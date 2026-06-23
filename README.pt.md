@@ -1,26 +1,19 @@
 # littleindian
 
-**littleindian** é um motor de xadrez UCI escrito do zero, **NNUE-nativo desde o primeiro dia** à volta de um formato de rede neuronal original chamado **NapK9**. Não há herança de avaliação handcrafted (HCE) nem código herdado de outro motor — tabuleiro, geração de lances, busca, tabela de transposição, gestão de tempo e UCI são todos código original.
+**littleindian** é um motor de xadrez UCI escrito do zero. Tem duas avaliações: uma rede neuronal própria (NNUE, formato **NapK9**, ainda em redesign) e uma avaliação handcrafted (HCE) completa e calibrada por Texel tuning, selecionável em runtime via `setoption name EvalFile value none`. Tabuleiro, geração de lances, busca, tabela de transposição, gestão de tempo e UCI são todos código original.
 
-> **Estado: desenvolvimento inicial.** O motor está nas fases F1/F2 do roteiro (ver [Roteiro](#roteiro) abaixo): a geração de lances está validada por perft e existe uma busca mínima com NNUE, mas as técnicas de busca além de um PVS básico ainda estão a ser adicionadas e validadas uma a uma. Ainda não está pronto para torneio.
+> **Estado: desenvolvimento inicial.** O motor está nas fases F1/F2 do roteiro (ver [Roteiro](#roteiro) abaixo): a geração de lances está validada por perft e existe uma busca mínima, mas as técnicas de busca além de um PVS básico ainda estão a ser adicionadas e validadas uma a uma. Ainda não está pronto para torneio.
 
 Outras línguas: [English](README.md) · [Français](README.fr.md)
 
 ---
 
-## Porquê "NNUE-nativo"
+## Duas avaliações
 
-A maioria dos motores NNUE enxertou uma rede neuronal numa busca afinada para avaliação handcrafted, mantendo os parâmetros de busca antigos. O littleindian evita isso de propósito: todos os parâmetros de busca (margens, reduções, gestão de tempo) nascem neutros e são afinados por SPSA/SPRT à escala de pontuação da própria rede NapK9, em vez de herdar valores calibrados para outra avaliação. Ver [`docs/CLAUDE.md`](docs/CLAUDE.md) para a justificação completa do desenho.
+- **NNUE (NapK9)**: formato próprio, em redesign ativo — a arquitetura concreta (tamanhos de camada, buckets, features) está a mudar entre sessões de treino, por isso não é documentada aqui em detalhe para evitar informação desatualizada. Ativa por defeito quando há rede embebida no binário.
+- **HCE**: PSQT + Material + Threats + Mobility + KingSafety + PawnStructure, todos calibrados juntos por Texel tuning sobre posições reais (binpacks formato Stockfish). Ativa com `setoption name EvalFile value none`. Usada como baseline de comparação e em experiências de calibração paralelas às da rede.
 
-## Avaliação: NapK9
-
-- Formato próprio, cabeçalho mágico `NAPK9LEB`.
-- Feature transformer + acumulador int16 (us/them), 8 *material buckets*, PSQT aditivo, `OUTPUT_SCALE_CP = 408`.
-- **Full threats**: `2(lado) × 2(ataque/defesa) × 6(atacante) × 6(vítima) × 64(casa) = 9216` features, além das 22528 features de peças (31744 no total).
-- Acumulador atualizado incrementalmente (push no `makeMove`, pop no `unmakeMove`), validado contra uma reconstrução completa (tem de ser bit-a-bit igual — ver `threattest`).
-- O gerador de features em Rust usado no treino (`bullet_integration/napk9_v10_features.rs`) e o gerador em C++ (`gatherThreatsFull`) têm sempre de produzir índices idênticos. Isto é verificado com `training/calibra_threats.py`.
-
-A rede em `nets/littleindian_1024.napk9` é trabalho original, treinada com o trainer próprio do projeto em `bullet_integration/`.
+Todos os parâmetros de busca (margens, reduções, gestão de tempo) são afinados por SPSA/SPRT, não herdados de outro motor. Ver [`docs/CLAUDE.md`](docs/CLAUDE.md) para a justificação completa do desenho.
 
 ## Compilar
 
@@ -46,7 +39,7 @@ Comandos UCI padrão (`position`, `go`, `isready`, `setoption`, `quit`) mais alg
 | Comando | Função |
 |---|---|
 | `perft N` | Verifica correção/velocidade do gerador de lances até profundidade N |
-| `eval` | Avaliação estática da posição atual (NapK9, do ponto de vista de quem joga) |
+| `eval` | Avaliação estática da posição atual, do ponto de vista de quem joga (só com NNUE carregada) |
 | `bench` | Busca fixa sobre um conjunto de posições embutido — usado como assinatura de regressão de nós/nps |
 | `threattest` | Valida o acumulador incremental contra uma reconstrução completa (tem de reportar `diff = 0`) |
 | `d` | Mostra o tabuleiro e o FEN |

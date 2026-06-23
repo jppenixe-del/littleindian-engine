@@ -1,26 +1,19 @@
 # littleindian
 
-**littleindian** is a UCI chess engine written from scratch, **NNUE-native from day one** around an original neural network format called **NapK9**. There is no handcrafted-evaluation (HCE) heritage and no codebase inherited from another engine — board representation, move generation, search, transposition table, time management and UCI are all original code.
+**littleindian** is a UCI chess engine written from scratch. It has two evaluations: an original neural network (NNUE, **NapK9** format, still under active redesign) and a complete handcrafted evaluation (HCE) tuned via Texel tuning, selectable at runtime with `setoption name EvalFile value none`. Board representation, move generation, search, transposition table, time management and UCI are all original code.
 
-> **Status: early development.** The engine is in Phase F1/F2 of its roadmap (see [Roadmap](#roadmap) below): move generation is perft-verified and a minimal NNUE-backed search exists, but search techniques beyond a basic PVS are still being added and validated one at a time. Not yet tournament-ready.
+> **Status: early development.** The engine is in Phase F1/F2 of its roadmap (see [Roadmap](#roadmap) below): move generation is perft-verified and a minimal search exists, but search techniques beyond a basic PVS are still being added and validated one at a time. Not yet tournament-ready.
 
 Other languages: [Português](README.pt.md) · [Français](README.fr.md)
 
 ---
 
-## Why "NNUE-native"
+## Two evaluations
 
-Most NNUE engines bolted a neural network evaluation onto a search tuned for handcrafted evaluation, then kept the old search parameters. littleindian intentionally avoids that: every search parameter (margins, reductions, time management) starts neutral and is tuned by SPSA/SPRT against the NapK9 network's own score scale, instead of inheriting values calibrated for a different evaluation. See [`docs/CLAUDE.md`](docs/CLAUDE.md) for the full design rationale.
+- **NNUE (NapK9)**: custom format, under active redesign — the concrete architecture (layer sizes, buckets, features) changes between training sessions, so it isn't documented here in detail to avoid stale information. Active by default when a network is embedded in the binary.
+- **HCE**: PSQT + Material + Threats + Mobility + KingSafety + PawnStructure, all jointly tuned via Texel tuning over real positions (Stockfish-format binpacks). Active with `setoption name EvalFile value none`. Used as a comparison baseline and in calibration experiments run in parallel to the network's.
 
-## Evaluation: NapK9
-
-- Custom format, magic header `NAPK9LEB`.
-- Feature transformer + int16 accumulator (us/them), 8 material buckets, additive PSQT, `OUTPUT_SCALE_CP = 408`.
-- **Full threats**: `2(side) × 2(attack/defend) × 6(attacker) × 6(victim) × 64(square) = 9216` features, on top of 22528 piece features (31744 total).
-- Incrementally updated accumulator (push on `makeMove`, pop on `unmakeMove`), validated against a full reconstruction (must be bit-identical — see `threattest`).
-- The Rust feature generator used for training (`bullet_integration/napk9_v10_features.rs`) and the C++ feature gatherer (`gatherThreatsFull`) must always produce identical indices. This is checked with `training/calibra_threats.py`.
-
-The network shipped in `nets/littleindian_1024.napk9` is original work, trained with the project's own trainer in `bullet_integration/`.
+Every search parameter (margins, reductions, time management) is tuned by SPSA/SPRT, not inherited from another engine. See [`docs/CLAUDE.md`](docs/CLAUDE.md) for the full design rationale.
 
 ## Building
 
@@ -46,7 +39,7 @@ Standard UCI commands (`position`, `go`, `isready`, `setoption`, `quit`) plus a 
 | Command | Purpose |
 |---|---|
 | `perft N` | Move generator correctness/speed check to depth N |
-| `eval` | Static evaluation of the current position (NapK9, side-to-move POV) |
+| `eval` | Static evaluation of the current position, side-to-move POV (NNUE only) |
 | `bench` | Fixed search over a built-in position set — used as the nodes/nps regression signature |
 | `threattest` | Validates the incremental accumulator against a full rebuild (must report `diff = 0`) |
 | `d` | Prints the board and FEN |

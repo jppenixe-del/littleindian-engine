@@ -36,7 +36,7 @@ inline void printBanner() {
     std::printf("              %s|||%s\n",           R, Z);
     std::printf("               %s|%s\n",            R, Z);
     std::printf("\n");
-    std::printf("   %slittleindian%s  %s·%s  %sUCI chess engine, NNUE-native (NapK9)%s\n",
+    std::printf("   %slittleindian%s  %s·%s  %sUCI chess engine, NNUE (NapK9) + HCE%s\n",
                 W, Z, DIM, Z, DIM, Z);
     std::printf("\n");
     std::fflush(stdout);
