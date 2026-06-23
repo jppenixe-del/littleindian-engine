@@ -743,6 +743,19 @@ static Score computeThreatScore(const Board& board, Color side, const AttackInfo
 }
 
 // ─── Eval ─────────────────────────────────────────────────────────────────
+// 🦅 HCE_RESCALE (×1.5): co-afinado com as margens de poda (RFP/NMP/futility/SE/
+// razoring), confirmado por gauntlet que baixar isto perde força real -- NÃO
+// alterar para "corrigir a escala". Mas o score relatado via UCI (info score cp,
+// usado pela adjudicação do cutechess-cli) e o modelo WDL (sigmoid(cp/400))
+// assumem cp "verdadeiros" na escala de kPieceValue -- desalinhados por este
+// mesmo fator. toOutputCp() desfaz o rescale SÓ na fronteira de saída (nunca
+// dentro da busca/poda), sem tocar na força de jogo.
+static constexpr double HCE_RESCALE = 1.5;
+static inline int toOutputCp(int score) {
+    if (napoleon::nnue::isLoaded()) return score;  // NNUE não usa HCE_RESCALE
+    return (int)std::lround(score / HCE_RESCALE);
+}
+
 static int staticEval(const Board& board) {
     int score;
     if (napoleon::nnue::isLoaded()) {
@@ -800,7 +813,6 @@ static int staticEval(const Board& board) {
         // aqui em vez de criar tabelas alternativas em cada sítio: corrige TODAS as
         // margens de uma vez, mantendo o resto do código (SEE, MVV-LVA, kPieceValue)
         // intocado -- só staticEval() muda de escala.
-        static constexpr double HCE_RESCALE = 1.5;
         sTapered = (int)(sTapered * HCE_RESCALE);
         score = board.sideToMove() == Color::WHITE ? sTapered : -sTapered;
         // Tempo: bónus por ser a vez de jogar -- interpolado pela MESMA fase, mas
@@ -2285,7 +2297,7 @@ static void searchBody(Board& board, const Limits& limits, bool isMain, uint64_t
             int mateIn = (MATE_SCORE - std::abs(score) + 1) / 2;
             snprintf(scoreStr, sizeof(scoreStr), "mate %d", score > 0 ? mateIn : -mateIn);
         } else {
-            snprintf(scoreStr, sizeof(scoreStr), "cp %d", score);
+            snprintf(scoreStr, sizeof(scoreStr), "cp %d", toOutputCp(score));
         }
 
         // PV completa via tabela triangular (gap real: só mostrava o primeiro lance
@@ -2298,7 +2310,7 @@ static void searchBody(Board& board, const Limits& limits, bool isMain, uint64_t
         }
 
         if (isMain) {
-            napoleon::wdl::Probs wdl = napoleon::wdl::expectedWDL(score);
+            napoleon::wdl::Probs wdl = napoleon::wdl::expectedWDL(toOutputCp(score));
             printf("info depth %d seldepth %d multipv 1 score %s wdl %d %d %d nodes %llu nps %llu time %lld pv %s\n",
                    depth, info.selDepth, scoreStr,
                    (int)std::lround(wdl.win * 1000.0), (int)std::lround(wdl.draw * 1000.0), (int)std::lround(wdl.loss * 1000.0),
@@ -2337,14 +2349,14 @@ static void searchBody(Board& board, const Limits& limits, bool isMain, uint64_t
                     int mateIn = (MATE_SCORE - std::abs(pvScore) + 1) / 2;
                     snprintf(pvScoreStr, sizeof(pvScoreStr), "mate %d", pvScore > 0 ? mateIn : -mateIn);
                 } else {
-                    snprintf(pvScoreStr, sizeof(pvScoreStr), "cp %d", pvScore);
+                    snprintf(pvScoreStr, sizeof(pvScoreStr), "cp %d", toOutputCp(pvScore));
                 }
                 char pvStr[512] = {};
                 int pvN = formatPv(gPvTable[0], gPvLength[0], pvStr, sizeof(pvStr));
                 if (pvN == 0) formatMoveUci(pvMove, pvStr);
                 int64_t pvElapsed = nowMs() - info.startMs;
                 uint64_t pvNps = pvElapsed > 0 ? info.nodes * 1000 / pvElapsed : info.nodes;
-                napoleon::wdl::Probs pvWdl = napoleon::wdl::expectedWDL(pvScore);
+                napoleon::wdl::Probs pvWdl = napoleon::wdl::expectedWDL(toOutputCp(pvScore));
                 printf("info depth %d seldepth %d multipv %d score %s wdl %d %d %d nodes %llu nps %llu time %lld pv %s\n",
                        depth, info.selDepth, pvIdx + 1, pvScoreStr,
                        (int)std::lround(pvWdl.win * 1000.0), (int)std::lround(pvWdl.draw * 1000.0), (int)std::lround(pvWdl.loss * 1000.0),
